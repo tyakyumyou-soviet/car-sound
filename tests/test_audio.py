@@ -1,4 +1,5 @@
 from array import array
+from math import sqrt
 import unittest
 
 from backturbo.audio import SoundEngine
@@ -32,6 +33,46 @@ class SoundEngineTests(unittest.TestCase):
         self.assertLess(low_values[0], 0.25)
         self.assertGreater(high_values[0], 0.75)
 
+    def test_turbo_spool_whine_rises_with_rpm_and_boost(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            engine.enabled = True
+            # Isolate the separately synthesized turbo layer from the recorded
+            # engine so its pitch and output level can be tested directly.
+            engine._recorded_engine_bands.clear()
+            engine._target_rpm = 6_600
+            engine._target_throttle = 0.92
+            engine._target_boost = 0.72
+            engine.render_chunk(engine.SAMPLE_RATE)
+            pcm = engine.render_chunk(engine.SAMPLE_RATE // 2)
+            values = array("h")
+            values.frombytes(pcm)
+            self.assertGreater(engine._turbo_spool, 0.65)
+            self.assertGreater(engine._turbo_whine_hz, 2_300.0)
+            self.assertLess(engine._turbo_whine_hz, 3_300.0)
+            self.assertGreater(max(abs(value) for value in values), 600)
+        finally:
+            engine.close()
+
+    def test_turbo_spool_whine_uses_back_turbine_toggle(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            engine._recorded_engine_bands.clear()
+            engine._target_rpm = 6_200
+            engine._target_throttle = 0.88
+            engine._target_boost = 0.65
+            muted = array("h")
+            muted.frombytes(engine.render_chunk(engine.SAMPLE_RATE // 2))
+
+            engine.enabled = True
+            engine.render_chunk(engine.SAMPLE_RATE)
+            audible = array("h")
+            audible.frombytes(engine.render_chunk(engine.SAMPLE_RATE // 2))
+            self.assertLess(max(abs(value) for value in muted), 10)
+            self.assertGreater(max(abs(value) for value in audible), 500)
+        finally:
+            engine.close()
+
     def test_flutter_is_rendered_inside_continuous_stream(self) -> None:
         engine = SoundEngine(enabled=False, engine_enabled=False)
         try:
@@ -47,15 +88,33 @@ class SoundEngineTests(unittest.TestCase):
         finally:
             engine.close()
 
-    def test_high_boost_recording_is_split_into_multiple_surges(self) -> None:
+    def test_high_boost_voice_uses_real_air_recording_for_multiple_catches(self) -> None:
         engine = SoundEngine(enabled=False, engine_enabled=False)
         try:
             engine.enabled = True
+            self.assertIsNotNone(engine._compressor_air)
+            self.assertIsNotNone(engine._compressor_air_hiss)
             event = SurgeEvent(0.78, 6_200, 0.70, 0.92, 6.2, "throttle_lift")
             engine._activate_flutter(event)
-            engine.render_chunk(engine._flutter_total)
-            self.assertGreaterEqual(engine._recorded_flutter_pulses, 5)
-            self.assertLessEqual(engine._recorded_flutter_pulses, 16)
+            pcm = engine.render_chunk(engine._flutter_total)
+            values = array("h")
+            values.frombytes(pcm)
+            self.assertGreaterEqual(engine._recorded_flutter_pulses, 8)
+            self.assertLessEqual(engine._recorded_flutter_pulses, 12)
+            self.assertGreater(max(abs(value) for value in values), 3_000)
+
+            mono = [(values[i] + values[i + 1]) * 0.5 for i in range(0, len(values), 2)]
+            window = int(0.010 * engine.SAMPLE_RATE)
+            rms = [
+                sqrt(sum(value * value for value in mono[start:start + window]) / window)
+                for start in range(0, len(mono) - window + 1, window)
+            ]
+            early = sum(rms[:18]) / 18
+            late = sum(rms[-18:]) / 18
+            # The source recording must not impose a second fade that erases
+            # the audible trailing "ko-ko / po-po" catches.
+            self.assertGreater(late, early * 0.12)
+            self.assertGreater(max(rms), min(value for value in rms if value > 1.0) * 4.0)
         finally:
             engine.close()
 

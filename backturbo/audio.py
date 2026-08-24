@@ -51,7 +51,15 @@ class SoundEngine:
         self._current_boost = -0.65
         self._pending_flutter: SurgeEvent | None = None
         self._engine_phase = 0.0
+        self._whine_phase_low = 0.0
         self._whine_phase = 0.0
+        self._whine_phase_secondary = 0.0
+        self._turbo_spool = 0.0
+        self._turbo_whine_hz = 720.0
+        self._turbo_air = 0.0
+        self._turbo_air_low = 0.0
+        self._turbo_pitch_wander = 0.0
+        self._whine_noise_seed = 0x34_86_15
         self._flutter_phase = 0.0
         self._flutter_carrier_left = 0.0
         self._flutter_carrier_right = 0.0
@@ -80,6 +88,14 @@ class SoundEngine:
         self._release_air = 0.0
         self._release_air_previous = 0.0
         self._release_tone_phase = 0.0
+        self._surge_resonators_left = [[0.0, 0.0], [0.0, 0.0]]
+        self._surge_resonators_right = [[0.0, 0.0], [0.0, 0.0]]
+        self._surge_noise_low_left = 0.0
+        self._surge_noise_low_right = 0.0
+        self._surge_noise_high_left = 0.0
+        self._surge_noise_high_right = 0.0
+        self._surge_noise_high_second_left = 0.0
+        self._surge_noise_high_second_right = 0.0
 
         self._assets = Path(__file__).resolve().parent.parent / "assets" / "audio"
         self._engine_grains: dict[int, array] = {}
@@ -91,6 +107,22 @@ class SoundEngine:
         self._recorded_flutter_rate = 1.0
         self._recorded_flutter_gain = 0.0
         self._recorded_flutter_pulses = 0
+        self._recorded_flutter_gate_left = 0.0
+        self._recorded_flutter_gate_right = 0.0
+        self._compressor_air: array | None = None
+        self._compressor_air_hiss: array | None = None
+        self._compressor_air_position = 0.0
+        self._compressor_air_rate = 1.0
+        self._surge_pulse_wait = 0
+        self._surge_pulse_index = 0
+        self._surge_pulse_scale = 1.0
+        self._surge_pulse_age = 0
+        self._surge_pulse_strength = 0.0
+        self._surge_body_frequency = 620.0
+        self._surge_body_left = [0.0, 0.0]
+        self._surge_body_right = [0.0, 0.0]
+        self._surge_hiss_left = 0.0
+        self._surge_hiss_right = 0.0
         self._load_recorded_samples()
 
         self._stream_process: subprocess.Popen[bytes] | None = None
@@ -135,9 +167,12 @@ class SoundEngine:
             carrier_hz = 205.0 + 90.0 * rpm + 55.0 * boost
             return duration, 0.0, amplitude, carrier_hz
         duration = 0.10 + 0.52 * boost + 0.10 * rpm + 0.12 * drop
-        pulse_rate = 8.0 + 7.5 * rpm + 4.0 * lift + 2.5 * boost
+        # Acoustic pitch and repetition rate are independent. A repetition
+        # rate near 20 Hz collapses into a "gara-gara" rattle, while roughly
+        # 10–15 Hz remains a sequence of distinct compressor catches.
+        pulse_rate = 8.2 + 2.1 * rpm + 1.2 * lift + 1.0 * boost
         amplitude = 0.035 + 0.38 * boost + 0.13 * drop
-        carrier_hz = 245.0 + 205.0 * rpm + 75.0 * boost
+        carrier_hz = 1_050.0 + 720.0 * rpm + 360.0 * boost
         return duration, pulse_rate, amplitude, carrier_hz
 
     def play(self, event: SurgeEvent) -> None:
@@ -224,15 +259,40 @@ class SoundEngine:
         self._flutter_carrier_hz = carrier_hz
         self._flutter_mode = event.reason
         boost_part = max(0.0, min(1.0, event.boost_bar / 0.85))
+        rpm_part = max(0.0, min(1.0, (event.rpm - 1_800.0) / 5_400.0))
         self._recorded_flutter_position = 0.0
-        self._recorded_flutter_rate = 1.28 - boost_part * 0.34
+        # A charged compressor produces a noticeably higher-pitched, thinner
+        # "shu-tu-tu" than a low-pressure whoosh. Speeding the real recording
+        # up with boost raises its pitch without inventing a hard sine tone.
+        self._recorded_flutter_rate = 1.25 + rpm_part * 0.12 + boost_part * 0.13
         self._recorded_flutter_gain = 0.30 + amplitude * 1.55
         self._recorded_flutter_pulses = 0
+        self._recorded_flutter_gate_left = 0.0
+        self._recorded_flutter_gate_right = 0.0
+        self._compressor_air_position = 0.0
+        self._compressor_air_rate = 1.00 + rpm_part * 0.12 + boost_part * 0.10
+        self._surge_pulse_wait = int(0.010 * self.SAMPLE_RATE)
+        self._surge_pulse_index = 0
+        self._surge_pulse_scale = 1.14 - rpm_part * 0.12 - boost_part * 0.20
+        self._surge_pulse_age = int(1.0 * self.SAMPLE_RATE)
+        self._surge_pulse_strength = 0.0
+        self._surge_body_frequency = 660.0 + rpm_part * 180.0 + boost_part * 120.0
+        self._surge_body_left = [0.0, 0.0]
+        self._surge_body_right = [0.0, 0.0]
+        self._surge_hiss_left = 0.0
+        self._surge_hiss_right = 0.0
         self._release_air = 0.0
         self._release_air_previous = 0.0
         self._release_tone_phase = 0.0
+        self._surge_resonators_left = [[0.0, 0.0], [0.0, 0.0]]
+        self._surge_resonators_right = [[0.0, 0.0], [0.0, 0.0]]
+        self._surge_noise_low_left = 0.0
+        self._surge_noise_low_right = 0.0
+        self._surge_noise_high_left = 0.0
+        self._surge_noise_high_right = 0.0
+        self._surge_noise_high_second_left = 0.0
+        self._surge_noise_high_second_right = 0.0
         self._flutter_canceling = False
-        rpm_part = max(0.0, min(1.0, (event.rpm - 1_800.0) / 5_400.0))
         self._flutter_delay_samples = int((0.0060 - rpm_part * 0.0025) * self.SAMPLE_RATE)
         if event.reason in {"valve_release", "pressure_release"}:
             self._flutter_phase = 0.0
@@ -246,7 +306,7 @@ class SoundEngine:
             # Real R34-style surge is not a continuous whoosh. Each compressor
             # re-catch is a short air burst, with enough tail to read as
             # "shu-tu-tu" rather than a digital tremolo.
-            pulse_width = 0.018 + event.intensity * 0.012
+            pulse_width = 0.030 + event.intensity * 0.018
             self._flutter_env_decay = math.exp(-1.0 / (self.SAMPLE_RATE * pulse_width))
         self._flutter_right_delay = 0
 
@@ -292,10 +352,47 @@ class SoundEngine:
                 engine_left, engine_right = self._render_recorded_engine(rpm, throttle)
 
             whine = 0.0
-            if self.engine_enabled and boost > -0.15:
-                whine_hz = 430.0 + rpm * 0.16 + max(0.0, boost) * 520.0
-                self._whine_phase = (self._whine_phase + 2.0 * math.pi * whine_hz / self.SAMPLE_RATE) % (2.0 * math.pi)
-                whine = math.sin(self._whine_phase) * (0.008 + max(0.0, boost) * 0.022)
+            # Compressor spool belongs to the turbo-effects bus.  It remains
+            # audible with the engine recording muted, and follows the same
+            # toggle as lift-off surge / back-turbine audio.
+            if self.enabled:
+                rpm_spool = max(0.0, min(1.0, (rpm - 1_500.0) / 5_700.0))
+                boost_spool = max(0.0, min(1.0, (boost + 0.08) / 0.90))
+                target_spool = boost_spool * 0.72 + rpm_spool * throttle * 0.28
+                spool_tau = 0.16 if target_spool > self._turbo_spool else 0.34
+                spool_alpha = 1.0 - math.exp(-1.0 / (self.SAMPLE_RATE * spool_tau))
+                self._turbo_spool += spool_alpha * (target_spool - self._turbo_spool)
+                # The supplied GT-R clip does not contain one needle-thin
+                # 5-6 kHz sine.  Its accelerating whistle is a moving bundle:
+                # a strong 2-3 kHz ridge and two broader lower partials,
+                # all surrounded by compressor-air texture.
+                self._turbo_whine_hz = 720.0 + 2_300.0 * self._turbo_spool ** 1.35 + rpm_spool * 180.0
+                self._whine_noise_seed = (
+                    1_664_525 * self._whine_noise_seed + 1_013_904_223
+                ) & 0xFFFFFFFF
+                raw_turbo_air = self._whine_noise_seed / 0xFFFFFFFF * 2.0 - 1.0
+                self._turbo_pitch_wander += 0.0008 * (raw_turbo_air - self._turbo_pitch_wander)
+                whine_hz = self._turbo_whine_hz * (1.0 + self._turbo_pitch_wander * 0.008)
+                self._whine_phase_low = (
+                    self._whine_phase_low + 2.0 * math.pi * whine_hz * 0.43 / self.SAMPLE_RATE
+                ) % (2.0 * math.pi)
+                self._whine_phase = (
+                    self._whine_phase + 2.0 * math.pi * whine_hz / self.SAMPLE_RATE
+                ) % (2.0 * math.pi)
+                self._whine_phase_secondary = (
+                    self._whine_phase_secondary
+                    + 2.0 * math.pi * whine_hz * 0.75 / self.SAMPLE_RATE
+                ) % (2.0 * math.pi)
+                self._turbo_air_low += 0.018 * (raw_turbo_air - self._turbo_air_low)
+                turbulent_air = raw_turbo_air - self._turbo_air_low
+                self._turbo_air += 0.34 * (turbulent_air - self._turbo_air)
+                spool_level = self._turbo_spool ** 1.15 * (0.35 + throttle * 0.65)
+                turbine_tone = (
+                    math.sin(self._whine_phase_low + self._turbo_air * 0.08) * 0.18
+                    + math.sin(self._whine_phase + self._turbo_air * 0.13) * 0.46
+                    + math.sin(self._whine_phase_secondary - self._turbo_air * 0.09) * 0.30
+                )
+                whine = turbine_tone * spool_level * 0.040 + self._turbo_air * spool_level * 0.010
 
             flutter_left = 0.0
             flutter_right = 0.0
@@ -330,41 +427,11 @@ class SoundEngine:
                     pcm.append(int(left * 32767))
                     pcm.append(int(right * 32767))
                     continue
-                if self._recorded_flutter is not None:
-                    pulse_rate = self._flutter_rate * (1.0 - 0.43 * progress)
-                    if not self._flutter_canceling:
-                        self._flutter_phase += pulse_rate / self.SAMPLE_RATE
-                        if self._flutter_phase >= 1.0:
-                            self._flutter_phase -= 1.0
-                            pulse_strength = (1.0 - progress) ** 0.42
-                            self._flutter_env_left = max(self._flutter_env_left, pulse_strength)
-                            self._flutter_env_right = max(self._flutter_env_right, pulse_strength * 0.95)
-                            self._recorded_flutter_pulses += 1
-                    source_frames = len(self._recorded_flutter) // 2
-                    source_frame = min(source_frames - 2, int(self._recorded_flutter_position))
-                    fraction = self._recorded_flutter_position - source_frame
-                    base = source_frame * 2
-                    next_base = base + 2
-                    fade = min(1.0, self._flutter_remaining / max(1, int(0.025 * self.SAMPLE_RATE)))
-                    # A tiny floor preserves compressor texture, while the
-                    # pulse envelope creates the clearly separated air catches.
-                    gate_left = 0.025 + self._flutter_env_left * 1.08
-                    gate_right = 0.025 + self._flutter_env_right * 1.08
-                    gain = self._recorded_flutter_gain * fade
-                    flutter_left = (
-                        self._recorded_flutter[base] * (1.0 - fraction)
-                        + self._recorded_flutter[next_base] * fraction
-                    ) / 32768.0 * gain * gate_left
-                    flutter_right = (
-                        self._recorded_flutter[base + 1] * (1.0 - fraction)
-                        + self._recorded_flutter[next_base + 1] * fraction
-                    ) / 32768.0 * gain * gate_right
-                    envelope_decay = 0.955 if self._flutter_canceling else self._flutter_env_decay
-                    self._flutter_env_left *= envelope_decay
-                    self._flutter_env_right *= envelope_decay
-                    self._recorded_flutter_position += self._recorded_flutter_rate
-                    if self._recorded_flutter_position >= source_frames - 2:
-                        self._flutter_remaining = 1
+                if self._flutter_mode in {"throttle_lift", "clutch"}:
+                    if self._compressor_air is not None:
+                        flutter_left, flutter_right = self._render_recorded_air_surge(progress)
+                    else:
+                        flutter_left, flutter_right = self._render_compressor_surge(progress)
                     self._flutter_remaining -= 1
                     left = max(-1.0, min(1.0, engine_left + whine + flutter_left))
                     right = max(-1.0, min(1.0, engine_right + whine + flutter_right))
@@ -412,6 +479,176 @@ class SoundEngine:
         self._current_throttle = end_throttle
         self._current_boost = end_boost
         return pcm.tobytes()
+
+    def _render_recorded_air_surge(self, progress: float) -> tuple[float, float]:
+        """Render a forceful, decelerating compressor-surge pulse train.
+
+        A real air recording supplies the turbulence.  A damped intake-path
+        resonance adds the rounded ``ko/po`` body, while a brighter recording
+        is strongest only on the first ``shu``.  Nothing is hard-switched, so
+        repeated pulses remain air movements rather than metallic impacts.
+        """
+        assert self._compressor_air is not None
+        if not self._flutter_canceling:
+            if self._surge_pulse_wait <= 0:
+                pulse_number = self._surge_pulse_index
+                strength = (1.0 - progress) ** 0.34
+                self._surge_pulse_strength = strength
+                self._surge_pulse_age = 0
+                # Pressure and wheel speed fall after every re-catch.  This
+                # downward body sweep is what turns a flat "sh-sh-sh" into
+                # the heavier "shu-KO-ko-po-po" heard from an open intake.
+                self._surge_body_frequency = max(
+                    360.0,
+                    self._flutter_carrier_hz * 0.30 * (0.94 ** pulse_number),
+                )
+                self._recorded_flutter_pulses += 1
+                # Measured from the supplied R34 reference: a flutter event
+                # is not metronomic. It starts with a few close catches, then
+                # leaves irregular, widening gaps as the compressor slows.
+                # Peak-to-peak gaps measured from the supplied R34 clip.  The
+                # early catches are quick and uneven (not a rattle), followed
+                # by one noticeably longer gap as pressure falls away.
+                reference_gaps = (
+                    0.060, 0.075, 0.070, 0.080, 0.055, 0.070, 0.070,
+                    0.165, 0.085, 0.085, 0.095,
+                )
+                gap = reference_gaps[min(self._surge_pulse_index, len(reference_gaps) - 1)]
+                self._surge_pulse_index += 1
+                self._surge_pulse_wait = max(1, round(gap * self._surge_pulse_scale * self.SAMPLE_RATE))
+            else:
+                self._surge_pulse_wait -= 1
+
+        source_frames = len(self._compressor_air) // 2
+        frame = int(self._compressor_air_position) % source_frames
+        next_frame = (frame + 1) % source_frames
+        fraction = self._compressor_air_position - frame
+        base = frame * 2
+        next_base = next_frame * 2
+        sample_left = self._compressor_air[base] * (1.0 - fraction) + self._compressor_air[next_base] * fraction
+        sample_right = self._compressor_air[base + 1] * (1.0 - fraction) + self._compressor_air[next_base + 1] * fraction
+        hiss_left = sample_left
+        hiss_right = sample_right
+        if self._compressor_air_hiss is not None:
+            hiss_frames = len(self._compressor_air_hiss) // 2
+            hiss_frame = frame % hiss_frames
+            hiss_next = (hiss_frame + 1) % hiss_frames
+            hiss_base = hiss_frame * 2
+            hiss_next_base = hiss_next * 2
+            hiss_left = (
+                self._compressor_air_hiss[hiss_base] * (1.0 - fraction)
+                + self._compressor_air_hiss[hiss_next_base] * fraction
+            )
+            hiss_right = (
+                self._compressor_air_hiss[hiss_base + 1] * (1.0 - fraction)
+                + self._compressor_air_hiss[hiss_next_base + 1] * fraction
+            )
+        self._compressor_air_position = (self._compressor_air_position + self._compressor_air_rate) % source_frames
+
+        age_seconds = self._surge_pulse_age / self.SAMPLE_RATE
+        attack_seconds = 0.0023 if self._surge_pulse_index <= 1 else 0.0034
+        decay_seconds = 0.034 - min(0.010, max(0, self._surge_pulse_index - 1) * 0.0012)
+        pulse_envelope = (
+            (1.0 - math.exp(-age_seconds / attack_seconds))
+            * math.exp(-age_seconds / decay_seconds)
+            * self._surge_pulse_strength
+        )
+        self._surge_pulse_age += 1
+
+        # Low-Q state-variable resonator: turbulent air excites the intake
+        # volume, producing a rounded body without introducing a pure tone.
+        resonator_f = min(0.16, 2.0 * math.sin(math.pi * self._surge_body_frequency / self.SAMPLE_RATE))
+        resonance_damping = 0.42
+        body_input_left = sample_left / 32768.0
+        body_input_right = sample_right / 32768.0
+        self._surge_body_left[0] += resonator_f * self._surge_body_left[1]
+        high_left = body_input_left - self._surge_body_left[0] - resonance_damping * self._surge_body_left[1]
+        self._surge_body_left[1] += resonator_f * high_left
+        self._surge_body_right[0] += resonator_f * self._surge_body_right[1]
+        high_right = body_input_right - self._surge_body_right[0] - resonance_damping * self._surge_body_right[1]
+        self._surge_body_right[1] += resonator_f * high_right
+
+        # Smooth the bright layer separately.  The first release is a broad
+        # "shu"; following catches rapidly become body-heavy "ko/po" pulses.
+        hiss_smoothing = 0.24
+        self._surge_hiss_left += hiss_smoothing * (hiss_left / 32768.0 - self._surge_hiss_left)
+        self._surge_hiss_right += hiss_smoothing * (hiss_right / 32768.0 - self._surge_hiss_right)
+        first_release = 1.0 if self._surge_pulse_index <= 1 else 0.0
+        hiss_mix = 0.22 + first_release * 0.95 + max(0.0, 0.22 - progress) * 0.55
+        body_mix = 2.75 + progress * 0.95
+        pressure_front = 1.25 + 4.8 * math.exp(-age_seconds / 0.012)
+        fade = min(1.0, self._flutter_remaining / max(1, int(0.035 * self.SAMPLE_RATE)))
+        # The surge sits on top of a loud recorded engine loop.  Keep enough
+        # headroom for the final mix, but make the air catches clearly audible
+        # rather than disappearing behind the engine on throttle lift.
+        gain = self._flutter_amplitude * 2.58 * pulse_envelope * fade
+        left_voice = (
+            self._surge_hiss_left * hiss_mix
+            + self._surge_body_left[1] * body_mix
+            + self._surge_body_left[0] * pressure_front
+        )
+        right_voice = (
+            self._surge_hiss_right * hiss_mix
+            + self._surge_body_right[1] * body_mix
+            + self._surge_body_right[0] * pressure_front
+        )
+        return (
+            left_voice * gain,
+            right_voice * gain * 0.97,
+        )
+
+    def _render_compressor_surge(self, progress: float) -> tuple[float, float]:
+        """Render one physical air-catch sample without the old flutter recording."""
+        pulse_rate = self._flutter_rate * (1.0 - 0.34 * progress)
+        if not self._flutter_canceling:
+            self._flutter_phase += pulse_rate / self.SAMPLE_RATE
+            if self._flutter_phase >= 1.0:
+                self._flutter_phase -= 1.0
+                strength = (1.0 - progress) ** 0.46
+                self._flutter_env_left = max(self._flutter_env_left, strength)
+                self._flutter_env_right = max(self._flutter_env_right, strength * 0.94)
+                self._recorded_flutter_pulses += 1
+
+        envelope_decay = 0.955 if self._flutter_canceling else self._flutter_env_decay
+        self._flutter_env_left *= envelope_decay
+        self._flutter_env_right *= envelope_decay
+        attack = 1.0 - math.exp(-1.0 / (self.SAMPLE_RATE * 0.015))
+        self._recorded_flutter_gate_left += attack * (
+            self._flutter_env_left - self._recorded_flutter_gate_left
+        )
+        self._recorded_flutter_gate_right += attack * (
+            self._flutter_env_right - self._recorded_flutter_gate_right
+        )
+
+        self._noise_seed = (1_664_525 * self._noise_seed + 1_013_904_223) & 0xFFFFFFFF
+        raw_left = self._noise_seed / 0xFFFFFFFF * 2.0 - 1.0
+        self._noise_seed = (1_664_525 * self._noise_seed + 1_013_904_223) & 0xFFFFFFFF
+        raw_right = self._noise_seed / 0xFFFFFFFF * 2.0 - 1.0
+        noise_highpass = 1.0 - math.exp(-2.0 * math.pi * 360.0 / self.SAMPLE_RATE)
+        noise_lowpass = 1.0 - math.exp(-2.0 * math.pi * 2_800.0 / self.SAMPLE_RATE)
+        self._surge_noise_low_left += noise_highpass * (raw_left - self._surge_noise_low_left)
+        self._surge_noise_low_right += noise_highpass * (raw_right - self._surge_noise_low_right)
+        self._surge_noise_high_left += noise_lowpass * (
+            (raw_left - self._surge_noise_low_left) - self._surge_noise_high_left
+        )
+        self._surge_noise_high_right += noise_lowpass * (
+            (raw_right - self._surge_noise_low_right) - self._surge_noise_high_right
+        )
+        self._surge_noise_high_second_left += noise_lowpass * (
+            self._surge_noise_high_left - self._surge_noise_high_second_left
+        )
+        self._surge_noise_high_second_right += noise_lowpass * (
+            self._surge_noise_high_right - self._surge_noise_high_second_right
+        )
+
+        fade = min(1.0, self._flutter_remaining / max(1, int(0.030 * self.SAMPLE_RATE)))
+        # Two low-pass stages turn white noise into a continuous rush of air.
+        # Deliberately avoid saturation here: it creates the brittle "bachi"
+        # transient that does not exist in a pressure-release sound.
+        amplitude = self._flutter_amplitude * 1.65 * fade
+        left = self._surge_noise_high_second_left * amplitude * self._recorded_flutter_gate_left
+        right = self._surge_noise_high_second_right * amplitude * self._recorded_flutter_gate_right
+        return left, right
 
     def _render_recorded_engine(self, rpm: float, throttle: float) -> tuple[float, float]:
         """Pitch and blend neighboring steady slices from a real GT-86 dyno pull."""
@@ -474,6 +711,30 @@ class SoundEngine:
             self._recorded_engine_bands.clear()
             self._recorded_engine_phases.clear()
 
+        compressor_air_path = self._assets / "compressor_air.mp3"
+        try:
+            if compressor_air_path.exists():
+                decoded_air = miniaudio.decode_file(
+                    str(compressor_air_path), output_format=miniaudio.SampleFormat.SIGNED16,
+                    nchannels=2, sample_rate=self.SAMPLE_RATE,
+                )
+                # Use only the stationary part of the air rush.  Including
+                # the recording's own long fade made our later modeled surge
+                # catches disappear (two independent decays multiplied).
+                # The opening valve and closing mechanism remain outside.
+                start = int(0.88 * self.SAMPLE_RATE) * 2
+                end = int(1.32 * self.SAMPLE_RATE) * 2
+                stable_air = array("h", decoded_air.samples[start:end])
+                self._compressor_air = self._prepare_compressor_air(
+                    stable_air, highpass_hz=240.0, lowpass_hz=1_900.0, gain=4.3,
+                )
+                self._compressor_air_hiss = self._prepare_compressor_air(
+                    stable_air, highpass_hz=900.0, lowpass_hz=6_200.0, gain=2.8,
+                )
+        except Exception:
+            self._compressor_air = None
+            self._compressor_air_hiss = None
+
         flutter_path = self._assets / "turbo_flutter.mp3"
         try:
             if flutter_path.exists():
@@ -488,9 +749,69 @@ class SoundEngine:
                     if max(abs(samples[base]), abs(samples[base + 1])) > 240:
                         onset = max(0, frame - int(0.004 * self.SAMPLE_RATE)) * 2
                         break
-                self._recorded_flutter = array("h", samples[onset:])
+                source = array("h", samples[onset:])
+                # Isolate compressor air. Retaining a portion of the original
+                # low band made its mechanical texture repeat as "gara-gara".
+                low_left = low_right = 0.0
+                low_second_left = low_second_right = 0.0
+                air_left = air_right = 0.0
+                highpassed = array("h")
+                highpass_alpha = 1.0 - math.exp(-2.0 * math.pi * 1_050.0 / self.SAMPLE_RATE)
+                air_lowpass_alpha = 1.0 - math.exp(-2.0 * math.pi * 8_500.0 / self.SAMPLE_RATE)
+                for index in range(0, len(source), 2):
+                    left = source[index]
+                    right = source[index + 1]
+                    low_left += highpass_alpha * (left - low_left)
+                    low_right += highpass_alpha * (right - low_right)
+                    first_left = left - low_left
+                    first_right = right - low_right
+                    low_second_left += highpass_alpha * (first_left - low_second_left)
+                    low_second_right += highpass_alpha * (first_right - low_second_right)
+                    second_left = first_left - low_second_left
+                    second_right = first_right - low_second_right
+                    air_left += air_lowpass_alpha * (second_left - air_left)
+                    air_right += air_lowpass_alpha * (second_right - air_right)
+                    highpassed.append(round(max(-30_000.0, min(30_000.0, air_left * 2.20))))
+                    highpassed.append(round(max(-30_000.0, min(30_000.0, air_right * 2.20))))
+                self._recorded_flutter = highpassed
         except Exception:
             self._recorded_flutter = None
+
+    @classmethod
+    def _prepare_compressor_air(
+        cls,
+        source: array,
+        *,
+        highpass_hz: float = 240.0,
+        lowpass_hz: float = 1_900.0,
+        gain: float = 4.3,
+    ) -> array:
+        """Keep the recorded air texture while removing valve/mechanical bite.
+
+        The supplied R34 reference has most of its flutter energy around
+        1.6 kHz.  The unprocessed CC0 air release extends strongly past 6 kHz,
+        which reads as a metallic click once it is chopped into pulses.  A
+        gentle speech-band filter keeps it recognisably *air*, not a synth or
+        a sampled valve mechanism.
+        """
+        highpass_state = [0.0, 0.0]
+        lowpass_first = [0.0, 0.0]
+        lowpass_second = [0.0, 0.0]
+        highpass_alpha = 1.0 - math.exp(-2.0 * math.pi * highpass_hz / cls.SAMPLE_RATE)
+        lowpass_alpha = 1.0 - math.exp(-2.0 * math.pi * lowpass_hz / cls.SAMPLE_RATE)
+        filtered = array("h")
+        for index in range(0, len(source), 2):
+            for channel, sample in enumerate((source[index], source[index + 1])):
+                highpass_state[channel] += highpass_alpha * (sample - highpass_state[channel])
+                air = sample - highpass_state[channel]
+                lowpass_first[channel] += lowpass_alpha * (air - lowpass_first[channel])
+                lowpass_second[channel] += lowpass_alpha * (
+                    lowpass_first[channel] - lowpass_second[channel]
+                )
+                # Filtering costs level; restore it linearly, without a clipper
+                # or saturation stage that would create the unwanted "bachi".
+                filtered.append(round(max(-30_000.0, min(30_000.0, lowpass_second[channel] * gain))))
+        return filtered
 
     @classmethod
     def _extract_engine_loop(cls, source: array, center_seconds: float, rpm: int) -> array:

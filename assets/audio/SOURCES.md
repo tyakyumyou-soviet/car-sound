@@ -14,4 +14,11 @@ The recordings in this directory are distributed under the Pixabay Content Licen
 - `turbo_flutter.mp3`: [Turbo flutter — spinopel](https://pixabay.com/sound-effects/film-special-effects-turbo-flutter-336362/), published 2025-05-05.
 - License: [Pixabay Content License summary](https://pixabay.com/service/license-summary/).
 
+## High-boost air layer
+
+- `compressor_air.mp3`: [short-gas-leak.wav — Astounded](https://freesound.org/people/Astounded/sounds/477846/).
+- License: [Creative Commons 0](https://creativecommons.org/publicdomain/zero/1.0/).
+- The central, mechanism-free section is used as the real air texture for each
+  high-boost compressor pulse.
+
 The files are decoded locally and used as layers in a realtime simulation. They are not redistributed as standalone stock media.
