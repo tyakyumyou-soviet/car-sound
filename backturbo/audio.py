@@ -651,11 +651,12 @@ class SoundEngine:
                 # is not metronomic. It starts with a few close catches, then
                 # leaves irregular, widening gaps as the compressor slows.
                 # Peak-to-peak gaps measured from the supplied R34 clip.  The
-                # early catches are quick and uneven (not a rattle), followed
-                # by one noticeably longer gap as pressure falls away.
+                # early catches are quick and uneven (not a rattle). Keep the
+                # widest interval below the point where it is perceived as a
+                # stopped sample followed by a restart.
                 reference_gaps = (
                     0.060, 0.075, 0.070, 0.080, 0.055, 0.070, 0.070,
-                    0.165, 0.085, 0.085, 0.095,
+                    0.085, 0.085, 0.090, 0.100,
                 )
                 gap = reference_gaps[min(self._surge_pulse_index, len(reference_gaps) - 1)]
                 self._surge_pulse_index += 1

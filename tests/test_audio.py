@@ -125,6 +125,11 @@ class SoundEngineTests(unittest.TestCase):
             # before the intentionally quiet exhausted-pressure tail.
             self.assertGreater(middle, early * 0.08)
             self.assertGreater(max(rms), min(value for value in rms if value > 1.0) * 3.0)
+            # There must be no silent hole inside the audible pulse train.
+            # A former 165 ms scheduled interval made the sample appear to
+            # stop halfway through and then restart.
+            active_train = rms[int(len(rms) * 0.10):int(len(rms) * 0.90)]
+            self.assertGreater(min(active_train), max(rms) * 0.05)
             # Exhausted pressure must end cleanly instead of repeating the
             # last source grain as a mechanical "ga-ga-ga" tail.
             final_tail = sum(rms[-6:]) / 6
