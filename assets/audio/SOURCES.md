@@ -22,3 +22,14 @@ The recordings in this directory are distributed under the Pixabay Content Licen
   high-boost compressor pulse.
 
 The files are decoded locally and used as layers in a realtime simulation. They are not redistributed as standalone stock media.
+
+## User-supplied R34 reference
+
+- `user_r34_reference.mp3`: audio extracted locally from
+  `/Users/tyakyumyou/Downloads/ターボの音.MOV`, supplied by the user for this
+  simulator.
+- Acceleration grains use 5.95–7.90 seconds. Brief release, normal release and
+  long high-boost surge use 5.38–5.72, 7.98–8.70 and 9.35–10.90 seconds.
+- This recording has no declared redistribution license in the supplied file.
+  Keep it local and do not push or redistribute it without permission from the
+  rights holder.

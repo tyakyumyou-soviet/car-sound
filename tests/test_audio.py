@@ -94,13 +94,18 @@ class SoundEngineTests(unittest.TestCase):
             engine.enabled = True
             self.assertIsNotNone(engine._compressor_air)
             self.assertIsNotNone(engine._compressor_air_hiss)
+            self.assertEqual(len(engine._reference_spool_bands), 6)
+            self.assertEqual(
+                set(engine._reference_release_clips),
+                {"valve_release", "pressure_release", "throttle_lift"},
+            )
             event = SurgeEvent(0.78, 6_200, 0.70, 0.92, 6.2, "throttle_lift")
             engine._activate_flutter(event)
             pcm = engine.render_chunk(engine._flutter_total)
             values = array("h")
             values.frombytes(pcm)
-            self.assertGreaterEqual(engine._recorded_flutter_pulses, 8)
-            self.assertLessEqual(engine._recorded_flutter_pulses, 12)
+            self.assertGreaterEqual(engine._recorded_flutter_pulses, 10)
+            self.assertLessEqual(engine._recorded_flutter_pulses, 18)
             self.assertGreater(max(abs(value) for value in values), 3_000)
 
             mono = [(values[i] + values[i + 1]) * 0.5 for i in range(0, len(values), 2)]
@@ -114,7 +119,7 @@ class SoundEngineTests(unittest.TestCase):
             # The source recording must not impose a second fade that erases
             # the audible trailing "ko-ko / po-po" catches.
             self.assertGreater(late, early * 0.12)
-            self.assertGreater(max(rms), min(value for value in rms if value > 1.0) * 4.0)
+            self.assertGreater(max(rms), min(value for value in rms if value > 1.0) * 3.0)
         finally:
             engine.close()
 

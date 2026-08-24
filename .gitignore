@@ -2,3 +2,5 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+# User-supplied video extraction; kept local until redistribution rights are confirmed.
+assets/audio/user_r34_reference.mp3
