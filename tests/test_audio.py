@@ -33,6 +33,14 @@ class SoundEngineTests(unittest.TestCase):
         self.assertLess(low_values[0], 0.25)
         self.assertGreater(high_values[0], 0.75)
 
+    def test_high_boost_event_reserves_time_for_natural_pulse_fade(self) -> None:
+        event = SurgeEvent(0.78, 6_200, 0.70, 0.92, 6.2, "throttle_lift")
+        duration, _, _, _ = SoundEngine.flutter_parameters(event)
+        # The event must outlive its final measured catch without adding the
+        # former long, continuous high-frequency air tail.
+        self.assertGreater(duration, 1.28)
+        self.assertLess(duration, 1.45)
+
     def test_turbo_spool_whine_rises_with_rpm_and_boost(self) -> None:
         engine = SoundEngine(enabled=False, engine_enabled=False)
         try:
@@ -107,8 +115,8 @@ class SoundEngineTests(unittest.TestCase):
             pcm = engine.render_chunk(engine._flutter_total)
             values = array("h")
             values.frombytes(pcm)
-            self.assertGreaterEqual(engine._recorded_flutter_pulses, 10)
-            self.assertLessEqual(engine._recorded_flutter_pulses, 12)
+            self.assertGreaterEqual(engine._recorded_flutter_pulses, 15)
+            self.assertLessEqual(engine._recorded_flutter_pulses, 16)
             self.assertGreater(max(abs(value) for value in values), 3_000)
 
             mono = [(values[i] + values[i + 1]) * 0.5 for i in range(0, len(values), 2)]
@@ -128,22 +136,25 @@ class SoundEngineTests(unittest.TestCase):
             # There must be no silent hole inside the audible pulse train.
             # A former 165 ms scheduled interval made the sample appear to
             # stop halfway through and then restart.
-            active_train = rms[int(len(rms) * 0.10):int(len(rms) * 0.90)]
+            # This range covers the measured twelve-pulse bank. The extended
+            # air-only coast after it is intentionally much quieter.
+            active_train = rms[int(len(rms) * 0.05):int(len(rms) * 0.53)]
             self.assertGreater(min(active_train), max(rms) * 0.05)
             # Exhausted pressure must end cleanly instead of repeating the
             # last source grain as a mechanical "ga-ga-ga" tail.
             final_tail = sum(rms[-6:]) / 6
             self.assertLess(final_tail, max(rms) * 0.12)
             tail_windows = rms[int(len(rms) * 0.76):]
-            self.assertGreater(
+            self.assertGreaterEqual(
                 sum(value > max(rms) * 0.002 for value in tail_windows),
                 5,
             )
-            # Once compressor catches stop, the air wash must take over
-            # without the large one-window collapse that sounded like a cut.
-            exhausted_tail = rms[int(len(rms) * 0.82):]
-            for previous, current in zip(exhausted_tail, exhausted_tail[1:]):
-                self.assertGreaterEqual(current, previous * 0.30)
+            # The four modeled catches after the measured bank must step down
+            # monotonically. There is deliberately no continuous hiss bed.
+            modeled_tail = rms[-50:-14]
+            modeled_peaks = [max(modeled_tail[index:index + 9]) for index in range(0, 36, 9)]
+            for previous, current in zip(modeled_peaks, modeled_peaks[1:]):
+                self.assertLess(current, previous * 0.80)
         finally:
             engine.close()
 

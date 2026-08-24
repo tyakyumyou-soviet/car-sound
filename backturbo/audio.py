@@ -126,6 +126,7 @@ class SoundEngine:
         self._surge_pulse_scale = 1.0
         self._surge_pulse_age = 0
         self._surge_pulse_strength = 0.0
+        self._surge_tail_output_scale = 1.0
         self._surge_body_frequency = 620.0
         self._surge_body_left = [0.0, 0.0]
         self._surge_body_right = [0.0, 0.0]
@@ -178,7 +179,11 @@ class SoundEngine:
         # longer than its brief and ordinary release events.  Preserve that
         # separation instead of time-compressing every high-boost catch into
         # roughly 0.7 seconds.
-        duration = 0.16 + 0.74 * boost + 0.15 * rpm + 0.15 * drop
+        # Leave only enough room for the last measured catch to decay. The
+        # pulse train itself now supplies the fade; a long air-only coast made
+        # an unwanted final ``shhh`` after the flutter had already finished.
+        release_tail = 0.22 + 0.12 * boost
+        duration = 0.16 + 0.74 * boost + 0.15 * rpm + 0.15 * drop + release_tail
         # Acoustic pitch and repetition rate are independent. A repetition
         # rate near 20 Hz collapses into a "gara-gara" rattle, while roughly
         # 10–15 Hz remains a sequence of distinct compressor catches.
@@ -288,6 +293,7 @@ class SoundEngine:
         self._surge_pulse_scale = 1.14 - rpm_part * 0.12 - boost_part * 0.20
         self._surge_pulse_age = int(1.0 * self.SAMPLE_RATE)
         self._surge_pulse_strength = 0.0
+        self._surge_tail_output_scale = 1.0
         self._surge_body_frequency = 660.0 + rpm_part * 180.0 + boost_part * 120.0
         self._surge_body_left = [0.0, 0.0]
         self._surge_body_right = [0.0, 0.0]
@@ -628,14 +634,26 @@ class SoundEngine:
         """
         assert self._compressor_air is not None
         if not self._flutter_canceling:
-            source_pulses_available = (
-                not self._reference_surge_pulses
-                or self._surge_pulse_index < len(self._reference_surge_pulses)
-            )
-            pressure_can_recatch = progress < 0.82
+            measured_pulse_count = len(self._reference_surge_pulses)
+            # Four low-level modeled catches continue after the twelve unique
+            # recorded grains. They fade the rhythm itself without looping a
+            # recording (which previously became a mechanical "ga-ga-ga").
+            maximum_pulses = measured_pulse_count + 4 if measured_pulse_count else 12
+            source_pulses_available = self._surge_pulse_index < maximum_pulses
+            pressure_can_recatch = progress < 0.92
             if self._surge_pulse_wait <= 0 and source_pulses_available and pressure_can_recatch:
                 pulse_number = self._surge_pulse_index
-                strength = (1.0 - progress) ** 0.34
+                pressure_strength = (1.0 - progress) ** 0.10
+                if pulse_number < measured_pulse_count:
+                    pulse_fraction = pulse_number / max(1, measured_pulse_count + 5)
+                    strength = (1.0 - pulse_fraction) ** 0.72 * pressure_strength
+                    self._surge_tail_output_scale = 1.0
+                else:
+                    modeled_tail = (0.30, 0.20, 0.12, 0.06)
+                    modeled_output = (0.90, 0.75, 0.55, 0.08)
+                    tail_index = min(pulse_number - measured_pulse_count, len(modeled_tail) - 1)
+                    strength = modeled_tail[tail_index] * pressure_strength
+                    self._surge_tail_output_scale = modeled_output[tail_index]
                 self._surge_pulse_strength = strength
                 self._surge_pulse_age = 0
                 # Pressure and wheel speed fall after every re-catch.  This
@@ -645,7 +663,8 @@ class SoundEngine:
                     360.0,
                     self._flutter_carrier_hz * 0.30 * (0.94 ** pulse_number),
                 )
-                self._trigger_reference_surge_pulse(pulse_number, strength)
+                if pulse_number < measured_pulse_count:
+                    self._trigger_reference_surge_pulse(pulse_number, strength)
                 self._recorded_flutter_pulses += 1
                 # Measured from the supplied R34 reference: a flutter event
                 # is not metronomic. It starts with a few close catches, then
@@ -655,8 +674,8 @@ class SoundEngine:
                 # widest interval below the point where it is perceived as a
                 # stopped sample followed by a restart.
                 reference_gaps = (
-                    0.060, 0.075, 0.070, 0.080, 0.055, 0.070, 0.070,
-                    0.085, 0.085, 0.090, 0.100,
+                    0.060, 0.075, 0.070, 0.080, 0.065, 0.075, 0.080,
+                    0.085, 0.085, 0.090, 0.095,
                 )
                 gap = reference_gaps[min(self._surge_pulse_index, len(reference_gaps) - 1)]
                 self._surge_pulse_index += 1
@@ -728,7 +747,14 @@ class SoundEngine:
         # The surge sits on top of a loud recorded engine loop.  Keep enough
         # headroom for the final mix, but make the air catches clearly audible
         # rather than disappearing behind the engine on throttle lift.
-        gain = self._flutter_amplitude * 2.58 * pulse_envelope * fade * pressure_tail
+        gain = (
+            self._flutter_amplitude
+            * 2.58
+            * pulse_envelope
+            * fade
+            * pressure_tail
+            * self._surge_tail_output_scale
+        )
         left_voice = (
             self._surge_hiss_left * hiss_mix
             + self._surge_body_left[1] * body_mix
@@ -739,18 +765,9 @@ class SoundEngine:
             + self._surge_body_right[1] * body_mix
             + self._surge_body_right[0] * pressure_front
         )
-        # After the final re-catch, real charge plumbing leaves a soft air
-        # wash rather than an abrupt digital stop. This tail contains no body
-        # resonator or repeated grain, so it cannot turn back into "ga-ga-ga".
-        tail_position = max(0.0, min(1.0, (progress - 0.72) / 0.28))
-        residual_envelope = math.sin(math.pi * tail_position) ** 1.5
-        # The high-passed source is intentionally quiet, so it needs its own
-        # tail level rather than inheriting the much lower pulse-layer mix.
-        # This overlaps the final catch and closes continuously at zero.
-        residual_gain = self._flutter_amplitude * 2.50 * residual_envelope
         return (
-            left_voice * gain + self._surge_hiss_left * residual_gain,
-            right_voice * gain * 0.97 + self._surge_hiss_right * residual_gain * 0.97,
+            left_voice * gain,
+            right_voice * gain * 0.97,
         )
 
     def _render_compressor_surge(self, progress: float) -> tuple[float, float]:
