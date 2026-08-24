@@ -168,12 +168,12 @@ class SoundEngine:
         if event.reason == "valve_release":
             duration = 0.075 + 0.090 * boost + 0.055 * drop
             amplitude = 0.055 + 0.24 * boost + 0.10 * drop
-            carrier_hz = 155.0 + 75.0 * rpm + 35.0 * boost
+            carrier_hz = 28.0 + 15.0 * rpm + 6.0 * boost
             return duration, 0.0, amplitude, carrier_hz
         if event.reason == "pressure_release":
             duration = 0.16 + 0.18 * boost + 0.08 * drop
             amplitude = 0.10 + 0.34 * boost + 0.12 * drop
-            carrier_hz = 205.0 + 90.0 * rpm + 55.0 * boost
+            carrier_hz = 36.0 + 18.0 * rpm + 9.0 * boost
             return duration, 0.0, amplitude, carrier_hz
         # The supplied video's final full-lift surge lasts substantially
         # longer than its brief and ordinary release events.  Preserve that
@@ -446,17 +446,21 @@ class SoundEngine:
                     envelope = attack * max(0.0, 1.0 - progress) ** tail_power
                     self._noise_seed = (1_664_525 * self._noise_seed + 1_013_904_223) & 0xFFFFFFFF
                     raw_noise = self._noise_seed / 0xFFFFFFFF * 2.0 - 1.0
-                    air_alpha = 0.18 if self._flutter_mode == "valve_release" else 0.31
+                    air_alpha = 0.11 if self._flutter_mode == "valve_release" else 0.19
                     self._release_air += air_alpha * (raw_noise - self._release_air)
                     airy = self._release_air - self._release_air_previous * 0.72
                     self._release_air_previous = self._release_air
                     tone_hz = self._flutter_carrier_hz * (1.0 - 0.48 * progress)
                     self._release_tone_phase += 2.0 * math.pi * tone_hz / self.SAMPLE_RATE
-                    tone = math.sin(self._release_tone_phase)
+                    tone = (
+                        math.sin(self._release_tone_phase)
+                        + math.sin(self._release_tone_phase * 2.0) * 0.38
+                        + math.sin(self._release_tone_phase * 3.0) * 0.10
+                    ) / 1.48
                     if self._flutter_mode == "valve_release":
-                        voice = tone * 0.64 + airy * 0.82
+                        voice = tone * 0.95 + airy * 0.42
                     else:
-                        voice = tone * 0.18 + airy * 1.42
+                        voice = tone * 0.55 + airy * 0.85
                     cancel_fade = min(1.0, self._flutter_remaining / max(1, int(0.025 * self.SAMPLE_RATE)))
                     flutter_left = voice * self._flutter_amplitude * envelope * cancel_fade
                     flutter_right = voice * self._flutter_amplitude * envelope * cancel_fade * 0.96
