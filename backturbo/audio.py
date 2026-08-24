@@ -63,6 +63,8 @@ class SoundEngine:
         self._reference_spool_bands: dict[int, array] = {}
         self._reference_spool_phases: dict[int, float] = {}
         self._reference_release_clips: dict[str, array] = {}
+        self._reference_surge_pulses: list[array] = []
+        self._reference_active_pulses: list[tuple[array, float, float, float]] = []
         self._reference_release_position = 0.0
         self._reference_release_rate = 1.0
         self._reference_release_gain = 0.0
@@ -292,18 +294,18 @@ class SoundEngine:
         self._surge_hiss_left = 0.0
         self._surge_hiss_right = 0.0
         self._reference_release_position = 0.0
+        self._reference_active_pulses.clear()
         release_clip = self._reference_release_clips.get(event.reason)
         if release_clip is None and event.reason == "clutch":
             release_clip = self._reference_release_clips.get("throttle_lift")
         if release_clip is not None:
-            self._reference_release_rate = max(
-                0.25,
-                (len(release_clip) // 2) / max(1, self._flutter_total),
-            )
+            # Never squeeze a complete recording into a short simulated event.
+            # A brief lift simply plays less of the native-rate recording.
+            self._reference_release_rate = 0.96 + rpm_part * 0.08 + boost_part * 0.04
             self._reference_release_gain = 0.34 + amplitude * 0.78
         else:
-            self._reference_release_rate = 1.0
-            self._reference_release_gain = 0.0
+            self._reference_release_rate = 0.96 + rpm_part * 0.08 + boost_part * 0.04
+            self._reference_release_gain = 0.34 + amplitude * 0.78
         self._release_air = 0.0
         self._release_air_previous = 0.0
         self._release_tone_phase = 0.0
@@ -543,6 +545,8 @@ class SoundEngine:
 
     def _render_reference_release(self) -> tuple[float, float]:
         """Read the matching real lift-off event from the supplied video."""
+        if self._flutter_mode in {"throttle_lift", "clutch"} and self._reference_surge_pulses:
+            return self._render_reference_surge_pulses()
         clip = self._reference_release_clips.get(self._flutter_mode)
         if clip is None and self._flutter_mode == "clutch":
             clip = self._reference_release_clips.get("throttle_lift")
@@ -563,6 +567,45 @@ class SoundEngine:
             cancel_fade = min(1.0, self._flutter_remaining / max(1, int(0.025 * self.SAMPLE_RATE)))
         gain = self._reference_release_gain * cancel_fade / 32768.0
         return left * gain, right * gain
+
+    def _trigger_reference_surge_pulse(self, pulse_number: int, strength: float) -> None:
+        """Start one native-speed air catch from the measured pulse bank."""
+        if not self._reference_surge_pulses:
+            return
+        index = min(pulse_number, len(self._reference_surge_pulses) - 1)
+        pulse = self._reference_surge_pulses[index]
+        # Tiny deterministic variation avoids a sampler-machine repetition,
+        # while the strict bounds prevent the old compressed/helium effect.
+        variation = ((pulse_number * 37) % 7 - 3) * 0.006
+        rate = max(0.90, min(1.10, self._reference_release_rate + variation))
+        gain = self._reference_release_gain * strength
+        self._reference_active_pulses.append((pulse, 0.0, rate, gain))
+
+    def _render_reference_surge_pulses(self) -> tuple[float, float]:
+        left = right = 0.0
+        still_active: list[tuple[array, float, float, float]] = []
+        cancel_fade = 1.0
+        if self._flutter_canceling:
+            cancel_fade = min(1.0, self._flutter_remaining / max(1, int(0.025 * self.SAMPLE_RATE)))
+        for pulse, position, rate, gain in self._reference_active_pulses:
+            frames = len(pulse) // 2
+            frame = int(position)
+            if frame >= frames - 1:
+                continue
+            fraction = position - frame
+            base = frame * 2
+            next_base = base + 2
+            left += (
+                pulse[base] * (1.0 - fraction) + pulse[next_base] * fraction
+            ) / 32768.0 * gain * cancel_fade
+            right += (
+                pulse[base + 1] * (1.0 - fraction) + pulse[next_base + 1] * fraction
+            ) / 32768.0 * gain * cancel_fade
+            next_position = position + rate
+            if next_position < frames - 1:
+                still_active.append((pulse, next_position, rate, gain))
+        self._reference_active_pulses = still_active
+        return left, right
 
     def _render_recorded_air_surge(self, progress: float) -> tuple[float, float]:
         """Render a forceful, decelerating compressor-surge pulse train.
@@ -586,6 +629,7 @@ class SoundEngine:
                     360.0,
                     self._flutter_carrier_hz * 0.30 * (0.94 ** pulse_number),
                 )
+                self._trigger_reference_surge_pulse(pulse_number, strength)
                 self._recorded_flutter_pulses += 1
                 # Measured from the supplied R34 reference: a flutter event
                 # is not metronomic. It starts with a few close catches, then
@@ -851,20 +895,39 @@ class SoundEngine:
                     # driver immediately reapplies throttle.
                     "valve_release": (5.38, 5.72),
                     "pressure_release": (7.98, 8.70),
-                    # The last event contains the long, clearly pulsed surge.
-                    "throttle_lift": (9.35, 10.90),
                 }
                 for reason, (start_seconds, end_seconds) in release_ranges.items():
                     start = int(start_seconds * self.SAMPLE_RATE) * 2
                     end = int(end_seconds * self.SAMPLE_RATE) * 2
                     self._reference_release_clips[reason] = self._prepare_compressor_air(
                         array("h", reference[start:end]),
-                        highpass_hz=280.0, lowpass_hz=7_200.0, gain=1.10,
+                        highpass_hz=520.0, lowpass_hz=7_200.0, gain=1.18,
                     )
+
+                # Split the final long surge into native-speed air catches.
+                # Scheduling these grains independently preserves pitch and
+                # transient length at every simulated boost level.
+                surge_start_seconds = 9.35
+                surge_end_seconds = 10.90
+                surge_start = int(surge_start_seconds * self.SAMPLE_RATE) * 2
+                surge_end = int(surge_end_seconds * self.SAMPLE_RATE) * 2
+                surge_source = self._prepare_compressor_air(
+                    array("h", reference[surge_start:surge_end]),
+                    highpass_hz=650.0, lowpass_hz=7_200.0, gain=1.35,
+                )
+                pulse_centers = (
+                    0.035, 0.095, 0.190, 0.310, 0.490, 0.650,
+                    0.760, 0.940, 1.100, 1.240, 1.360, 1.490,
+                )
+                for center in pulse_centers:
+                    pulse = self._extract_reference_pulse(surge_source, center)
+                    if pulse:
+                        self._reference_surge_pulses.append(pulse)
         except Exception:
             self._reference_spool_bands.clear()
             self._reference_spool_phases.clear()
             self._reference_release_clips.clear()
+            self._reference_surge_pulses.clear()
 
         flutter_path = self._assets / "turbo_flutter.mp3"
         try:
@@ -962,6 +1025,27 @@ class SoundEngine:
                 value = loop[tail_index] * (1.0 - blend) + loop[head_index] * blend
                 loop[tail_index] = round(max(-32_768.0, min(32_767.0, value)))
         return loop
+
+    @classmethod
+    def _extract_reference_pulse(cls, source: array, center_seconds: float) -> array:
+        """Cut one measured air catch with click-free edges."""
+        source_frames = len(source) // 2
+        before_frames = int(0.014 * cls.SAMPLE_RATE)
+        pulse_frames = int(0.084 * cls.SAMPLE_RATE)
+        center = int(center_seconds * cls.SAMPLE_RATE)
+        start = max(0, min(source_frames - pulse_frames, center - before_frames))
+        pulse = array("h", source[start * 2:(start + pulse_frames) * 2])
+        fade_frames = min(int(0.006 * cls.SAMPLE_RATE), pulse_frames // 4)
+        for frame in range(fade_frames):
+            fade_in = (frame + 1) / fade_frames
+            fade_out = (fade_frames - frame - 1) / fade_frames
+            tail_frame = pulse_frames - fade_frames + frame
+            for channel in (0, 1):
+                head_index = frame * 2 + channel
+                tail_index = tail_frame * 2 + channel
+                pulse[head_index] = round(pulse[head_index] * fade_in)
+                pulse[tail_index] = round(pulse[tail_index] * fade_out)
+        return pulse
 
     @classmethod
     def _extract_engine_loop(cls, source: array, center_seconds: float, rpm: int) -> array:

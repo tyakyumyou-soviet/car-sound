@@ -97,10 +97,13 @@ class SoundEngineTests(unittest.TestCase):
             self.assertEqual(len(engine._reference_spool_bands), 6)
             self.assertEqual(
                 set(engine._reference_release_clips),
-                {"valve_release", "pressure_release", "throttle_lift"},
+                {"valve_release", "pressure_release"},
             )
+            self.assertEqual(len(engine._reference_surge_pulses), 12)
             event = SurgeEvent(0.78, 6_200, 0.70, 0.92, 6.2, "throttle_lift")
             engine._activate_flutter(event)
+            self.assertGreaterEqual(engine._reference_release_rate, 0.90)
+            self.assertLessEqual(engine._reference_release_rate, 1.10)
             pcm = engine.render_chunk(engine._flutter_total)
             values = array("h")
             values.frombytes(pcm)
@@ -134,8 +137,12 @@ class SoundEngineTests(unittest.TestCase):
             self.assertGreater(psh_params[0], pou_params[0])
             self.assertGreater(psh_params[2], pou_params[2])
             engine._activate_flutter(pou)
+            self.assertGreaterEqual(engine._reference_release_rate, 0.90)
+            self.assertLessEqual(engine._reference_release_rate, 1.10)
             pou_pcm = engine.render_chunk(2_048)
             engine._activate_flutter(psh)
+            self.assertGreaterEqual(engine._reference_release_rate, 0.90)
+            self.assertLessEqual(engine._reference_release_rate, 1.10)
             psh_pcm = engine.render_chunk(2_048)
             self.assertNotEqual(pou_pcm, psh_pcm)
         finally:
