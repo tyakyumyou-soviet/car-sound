@@ -298,14 +298,20 @@ class SoundEngine:
         release_clip = self._reference_release_clips.get(event.reason)
         if release_clip is None and event.reason == "clutch":
             release_clip = self._reference_release_clips.get("throttle_lift")
-        if release_clip is not None:
-            # Never squeeze a complete recording into a short simulated event.
-            # A brief lift simply plays less of the native-rate recording.
-            self._reference_release_rate = 0.96 + rpm_part * 0.08 + boost_part * 0.04
+        # Never squeeze a complete recording into a short simulated event.
+        # A brief lift simply plays less of the native-rate recording.
+        self._reference_release_rate = 0.96 + rpm_part * 0.08 + boost_part * 0.04
+        if event.reason == "valve_release":
+            # The supplied clip contains engine/road content that overwhelms
+            # a tiny 0.01-0.09 bar release. Keep that range purely procedural,
+            # then fade the recording in gradually so 0.10 bar cannot create
+            # a sudden timbre/volume jump.
+            reference_mix = max(0.0, min(1.0, (event.boost_bar - 0.09) / 0.07))
+            self._reference_release_gain = (0.34 + amplitude * 0.78) * reference_mix
+        elif release_clip is not None or event.reason in {"throttle_lift", "clutch"}:
             self._reference_release_gain = 0.34 + amplitude * 0.78
         else:
-            self._reference_release_rate = 0.96 + rpm_part * 0.08 + boost_part * 0.04
-            self._reference_release_gain = 0.34 + amplitude * 0.78
+            self._reference_release_gain = 0.0
         self._release_air = 0.0
         self._release_air_previous = 0.0
         self._release_tone_phase = 0.0
@@ -545,6 +551,8 @@ class SoundEngine:
 
     def _render_reference_release(self) -> tuple[float, float]:
         """Read the matching real lift-off event from the supplied video."""
+        if self._reference_release_gain <= 0.0:
+            return 0.0, 0.0
         if self._flutter_mode in {"throttle_lift", "clutch"} and self._reference_surge_pulses:
             return self._render_reference_surge_pulses()
         clip = self._reference_release_clips.get(self._flutter_mode)
@@ -730,9 +738,18 @@ class SoundEngine:
             + self._surge_body_right[1] * body_mix
             + self._surge_body_right[0] * pressure_front
         )
+        # After the final re-catch, real charge plumbing leaves a soft air
+        # wash rather than an abrupt digital stop. This tail contains no body
+        # resonator or repeated grain, so it cannot turn back into "ga-ga-ga".
+        tail_position = max(0.0, min(1.0, (progress - 0.72) / 0.28))
+        residual_envelope = math.sin(math.pi * tail_position) ** 1.5
+        # The high-passed source is intentionally quiet, so it needs its own
+        # tail level rather than inheriting the much lower pulse-layer mix.
+        # This overlaps the final catch and closes continuously at zero.
+        residual_gain = self._flutter_amplitude * 2.50 * residual_envelope
         return (
-            left_voice * gain,
-            right_voice * gain * 0.97,
+            left_voice * gain + self._surge_hiss_left * residual_gain,
+            right_voice * gain * 0.97 + self._surge_hiss_right * residual_gain * 0.97,
         )
 
     def _render_compressor_surge(self, progress: float) -> tuple[float, float]:

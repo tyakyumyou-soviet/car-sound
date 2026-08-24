@@ -129,6 +129,40 @@ class SoundEngineTests(unittest.TestCase):
             # last source grain as a mechanical "ga-ga-ga" tail.
             final_tail = sum(rms[-6:]) / 6
             self.assertLess(final_tail, max(rms) * 0.12)
+            tail_windows = rms[int(len(rms) * 0.76):]
+            self.assertGreater(
+                sum(value > max(rms) * 0.002 for value in tail_windows),
+                5,
+            )
+            # Once compressor catches stop, the air wash must take over
+            # without the large one-window collapse that sounded like a cut.
+            exhausted_tail = rms[int(len(rms) * 0.82):]
+            for previous, current in zip(exhausted_tail, exhausted_tail[1:]):
+                self.assertGreaterEqual(current, previous * 0.30)
+        finally:
+            engine.close()
+
+    def test_tiny_positive_boost_does_not_mix_noisy_reference_clip(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            engine.enabled = True
+            tiny = SurgeEvent(0.20, 2_500, 0.05, 0.28, 1.3, "valve_release")
+            engine._activate_flutter(tiny)
+            self.assertEqual(engine._reference_release_gain, 0.0)
+            tiny_pcm = engine.render_chunk(engine._flutter_total)
+
+            audible = SurgeEvent(0.28, 2_900, 0.11, 0.34, 1.8, "valve_release")
+            engine._activate_flutter(audible)
+            transition_gain = engine._reference_release_gain
+            self.assertGreater(transition_gain, 0.0)
+
+            full = SurgeEvent(0.34, 3_200, 0.18, 0.45, 2.2, "valve_release")
+            engine._activate_flutter(full)
+            self.assertGreater(engine._reference_release_gain, transition_gain)
+
+            engine._activate_flutter(audible)
+            audible_pcm = engine.render_chunk(engine._flutter_total)
+            self.assertNotEqual(tiny_pcm, audible_pcm)
         finally:
             engine.close()
 
