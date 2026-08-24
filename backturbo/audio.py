@@ -587,6 +587,9 @@ class SoundEngine:
         cancel_fade = 1.0
         if self._flutter_canceling:
             cancel_fade = min(1.0, self._flutter_remaining / max(1, int(0.025 * self.SAMPLE_RATE)))
+        progress = 1.0 - self._flutter_remaining / max(1, self._flutter_total)
+        pressure_tail = max(0.0, min(1.0, (1.0 - progress) / 0.20))
+        pressure_tail = pressure_tail * pressure_tail * (3.0 - 2.0 * pressure_tail)
         for pulse, position, rate, gain in self._reference_active_pulses:
             frames = len(pulse) // 2
             frame = int(position)
@@ -597,10 +600,10 @@ class SoundEngine:
             next_base = base + 2
             left += (
                 pulse[base] * (1.0 - fraction) + pulse[next_base] * fraction
-            ) / 32768.0 * gain * cancel_fade
+            ) / 32768.0 * gain * cancel_fade * pressure_tail
             right += (
                 pulse[base + 1] * (1.0 - fraction) + pulse[next_base + 1] * fraction
-            ) / 32768.0 * gain * cancel_fade
+            ) / 32768.0 * gain * cancel_fade * pressure_tail
             next_position = position + rate
             if next_position < frames - 1:
                 still_active.append((pulse, next_position, rate, gain))
@@ -617,7 +620,12 @@ class SoundEngine:
         """
         assert self._compressor_air is not None
         if not self._flutter_canceling:
-            if self._surge_pulse_wait <= 0:
+            source_pulses_available = (
+                not self._reference_surge_pulses
+                or self._surge_pulse_index < len(self._reference_surge_pulses)
+            )
+            pressure_can_recatch = progress < 0.82
+            if self._surge_pulse_wait <= 0 and source_pulses_available and pressure_can_recatch:
                 pulse_number = self._surge_pulse_index
                 strength = (1.0 - progress) ** 0.34
                 self._surge_pulse_strength = strength
@@ -644,7 +652,7 @@ class SoundEngine:
                 gap = reference_gaps[min(self._surge_pulse_index, len(reference_gaps) - 1)]
                 self._surge_pulse_index += 1
                 self._surge_pulse_wait = max(1, round(gap * self._surge_pulse_scale * self.SAMPLE_RATE))
-            else:
+            elif self._surge_pulse_wait > 0:
                 self._surge_pulse_wait -= 1
 
         source_frames = len(self._compressor_air) // 2
@@ -706,10 +714,12 @@ class SoundEngine:
         body_mix = 2.75 + progress * 0.95
         pressure_front = 1.25 + 4.8 * math.exp(-age_seconds / 0.012)
         fade = min(1.0, self._flutter_remaining / max(1, int(0.035 * self.SAMPLE_RATE)))
+        pressure_tail = max(0.0, min(1.0, (1.0 - progress) / 0.20))
+        pressure_tail = pressure_tail * pressure_tail * (3.0 - 2.0 * pressure_tail)
         # The surge sits on top of a loud recorded engine loop.  Keep enough
         # headroom for the final mix, but make the air catches clearly audible
         # rather than disappearing behind the engine on throttle lift.
-        gain = self._flutter_amplitude * 2.58 * pulse_envelope * fade
+        gain = self._flutter_amplitude * 2.58 * pulse_envelope * fade * pressure_tail
         left_voice = (
             self._surge_hiss_left * hiss_mix
             + self._surge_body_left[1] * body_mix

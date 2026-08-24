@@ -108,7 +108,7 @@ class SoundEngineTests(unittest.TestCase):
             values = array("h")
             values.frombytes(pcm)
             self.assertGreaterEqual(engine._recorded_flutter_pulses, 10)
-            self.assertLessEqual(engine._recorded_flutter_pulses, 18)
+            self.assertLessEqual(engine._recorded_flutter_pulses, 12)
             self.assertGreater(max(abs(value) for value in values), 3_000)
 
             mono = [(values[i] + values[i + 1]) * 0.5 for i in range(0, len(values), 2)]
@@ -118,11 +118,17 @@ class SoundEngineTests(unittest.TestCase):
                 for start in range(0, len(mono) - window + 1, window)
             ]
             early = sum(rms[:18]) / 18
-            late = sum(rms[-18:]) / 18
-            # The source recording must not impose a second fade that erases
-            # the audible trailing "ko-ko / po-po" catches.
-            self.assertGreater(late, early * 0.12)
+            middle_start = int(len(rms) * 0.50)
+            middle_end = int(len(rms) * 0.78)
+            middle = sum(rms[middle_start:middle_end]) / max(1, middle_end - middle_start)
+            # Several catches must remain through the pressure-decay phase,
+            # before the intentionally quiet exhausted-pressure tail.
+            self.assertGreater(middle, early * 0.08)
             self.assertGreater(max(rms), min(value for value in rms if value > 1.0) * 3.0)
+            # Exhausted pressure must end cleanly instead of repeating the
+            # last source grain as a mechanical "ga-ga-ga" tail.
+            final_tail = sum(rms[-6:]) / 6
+            self.assertLess(final_tail, max(rms) * 0.12)
         finally:
             engine.close()
 
