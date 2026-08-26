@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 # User-supplied video extraction; kept local until redistribution rights are confirmed.
 assets/audio/user_r34_reference.mp3
+assets/audio/user_high_boost_reference.mp3
