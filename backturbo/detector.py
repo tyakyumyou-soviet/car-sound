@@ -43,7 +43,11 @@ class BackTurboDetector:
             lift_rate = throttle_drop / lift_seconds
             clutch_edge = frame.clutch_pressed and not previous.clutch_pressed
             charged = self.peak_boost >= 0.015 and previous.rpm >= 1800.0
-            throttle_lift = throttle_drop >= 0.12 and frame.throttle <= 0.55
+            throttle_lift = (
+                throttle_drop >= 0.08
+                and lift_rate >= 0.25
+                and frame.throttle <= 0.88
+            )
             clutch_lift = clutch_edge and peak_throttle >= 0.18
             cooled_down = frame.timestamp - self.last_event_time >= self.cooldown_seconds
 
@@ -53,9 +57,12 @@ class BackTurboDetector:
                 drop_part = min(1.0, max(throttle_drop, 0.25 if clutch_lift else 0.0))
                 rate_part = min(1.0, lift_rate / 5.0)
                 intensity = max(0.04, min(1.0, 0.48 * boost_part + 0.20 * rpm_part + 0.20 * drop_part + 0.12 * rate_part))
-                if self.peak_boost < 0.09 or intensity < 0.18:
+                # Sound family follows stored manifold pressure directly.
+                # Intensity still controls loudness inside each family, but
+                # must not collapse different boost levels into one voice.
+                if self.peak_boost < 0.15:
                     reason = "valve_release"
-                elif not clutch_lift and (self.peak_boost < 0.22 or intensity < 0.32):
+                elif not clutch_lift and self.peak_boost < 0.45:
                     reason = "pressure_release"
                 elif clutch_lift:
                     reason = "clutch"
@@ -69,9 +76,18 @@ class BackTurboDetector:
                     lift_rate=lift_rate,
                     reason=reason,
                 )
-                self.last_event_time = frame.timestamp
-                self.peak_boost = 0.0
+                partial_lift = frame.throttle > 0.10 and throttle_drop < 0.60
+                if partial_lift:
+                    # A shallow lift vents only part of the stored charge.
+                    # Preserve the remainder so a subsequent full lift can
+                    # produce its own, stronger event shortly afterwards.
+                    self.last_event_time = frame.timestamp - max(0.0, self.cooldown_seconds - 0.10)
+                    self.peak_boost *= 0.62
+                else:
+                    self.last_event_time = frame.timestamp
+                    self.peak_boost = 0.0
                 self.throttle_history.clear()
+                self.throttle_history.append((frame.timestamp, frame.throttle))
 
         self.previous = frame
         if event is None and previous is not None and frame.throttle <= 0.16:

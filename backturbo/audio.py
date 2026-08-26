@@ -43,6 +43,11 @@ class SoundEngine:
         self._last_engine_play = float("-inf")
 
         self._state_lock = threading.Lock()
+        self._profile_controls = {
+            "small": {"pitch": 0.70, "tail": 0.65, "volume": 0.85},
+            "medium": {"pitch": 0.92, "tail": 0.95, "volume": 1.00},
+            "high": {"pitch": 1.10, "tail": 1.00, "volume": 1.15},
+        }
         self._target_rpm = 850.0
         self._target_throttle = 0.0
         self._target_boost = -0.65
@@ -84,6 +89,9 @@ class SoundEngine:
         self._flutter_env_decay = 0.9977
         self._flutter_canceling = False
         self._cancel_flutter_requested = False
+        self._active_profile = "small"
+        self._profile_pitch_scale = 1.0
+        self._profile_tail_scale = 1.0
         self._noise_seed = 0x86_34_26
         self._noise_left = 0.0
         self._noise_right = 0.0
@@ -96,6 +104,8 @@ class SoundEngine:
         self._release_air = 0.0
         self._release_air_previous = 0.0
         self._release_tone_phase = 0.0
+        self._release_load_mix = 0.0
+        self._release_depth = 0.0
         self._surge_resonators_left = [[0.0, 0.0], [0.0, 0.0]]
         self._surge_resonators_right = [[0.0, 0.0], [0.0, 0.0]]
         self._surge_noise_low_left = 0.0
@@ -127,6 +137,8 @@ class SoundEngine:
         self._surge_pulse_age = 0
         self._surge_pulse_strength = 0.0
         self._surge_tail_output_scale = 1.0
+        self._surge_measured_pulse_limit = 12
+        self._surge_modeled_tail_count = 4
         self._surge_body_frequency = 620.0
         self._surge_body_left = [0.0, 0.0]
         self._surge_body_right = [0.0, 0.0]
@@ -165,15 +177,18 @@ class SoundEngine:
         rpm = max(0.0, min(1.0, (event.rpm - 1_800.0) / 5_400.0))
         drop = max(0.0, min(1.0, event.throttle_drop))
         lift = max(0.0, min(1.0, event.lift_rate / 6.0))
+        depth = max(0.0, min(1.0, (drop - 0.08) / 0.82))
+        release = max(0.0, min(1.0, depth * 0.75 + lift * 0.25))
         if event.reason == "valve_release":
-            duration = 0.075 + 0.090 * boost + 0.055 * drop
-            amplitude = 0.055 + 0.24 * boost + 0.10 * drop
-            carrier_hz = 28.0 + 15.0 * rpm + 6.0 * boost
+            duration = 0.060 + 0.055 * boost + 0.075 * release
+            amplitude = (0.090 + 0.28 * boost + 0.14 * drop) * (0.55 + 0.45 * release)
+            carrier_hz = (28.0 + 15.0 * rpm + 6.0 * boost) * (0.82 + 0.18 * release)
             return duration, 0.0, amplitude, carrier_hz
         if event.reason == "pressure_release":
-            duration = 0.16 + 0.18 * boost + 0.08 * drop
-            amplitude = 0.10 + 0.34 * boost + 0.12 * drop
-            carrier_hz = 36.0 + 18.0 * rpm + 9.0 * boost
+            medium = max(0.0, min(1.0, (event.boost_bar - 0.15) / 0.30))
+            duration = 0.20 + 0.18 * medium + (0.08 + 0.12 * medium) * release
+            amplitude = (0.24 + 0.24 * medium + 0.12 * drop) * (0.45 + 0.55 * release)
+            carrier_hz = (150.0 + 120.0 * medium + 35.0 * rpm) * (0.78 + 0.22 * release)
             return duration, 0.0, amplitude, carrier_hz
         # The supplied video's final full-lift surge lasts substantially
         # longer than its brief and ordinary release events.  Preserve that
@@ -183,14 +198,38 @@ class SoundEngine:
         # pulse train itself now supplies the fade; a long air-only coast made
         # an unwanted final ``shhh`` after the flutter had already finished.
         release_tail = 0.22 + 0.12 * boost
-        duration = 0.16 + 0.74 * boost + 0.15 * rpm + 0.15 * drop + release_tail
+        full_duration = 0.16 + 0.74 * boost + 0.15 * rpm + 0.15 * drop + release_tail
+        partial_duration = 0.18 + 0.20 * boost + 0.04 * rpm
+        duration = partial_duration + (full_duration - partial_duration) * release
         # Acoustic pitch and repetition rate are independent. A repetition
         # rate near 20 Hz collapses into a "gara-gara" rattle, while roughly
         # 10–15 Hz remains a sequence of distinct compressor catches.
-        pulse_rate = 8.2 + 2.1 * rpm + 1.2 * lift + 1.0 * boost
-        amplitude = 0.035 + 0.38 * boost + 0.13 * drop
+        pulse_rate = 7.0 + 1.7 * rpm + 1.8 * release + 1.0 * boost
+        amplitude = (0.035 + 0.38 * boost + 0.13 * drop) * (0.35 + 0.65 * release)
         carrier_hz = 1_050.0 + 720.0 * rpm + 360.0 * boost
         return duration, pulse_rate, amplitude, carrier_hz
+
+    @staticmethod
+    def profile_for_reason(reason: str) -> str:
+        if reason == "valve_release":
+            return "small"
+        if reason == "pressure_release":
+            return "medium"
+        return "high"
+
+    def set_profile_controls(
+        self, profile: str, *, pitch: float, tail: float, volume: float,
+    ) -> None:
+        if profile not in self._profile_controls:
+            raise ValueError("unknown sound profile")
+        self._profile_controls[profile] = {
+            "pitch": max(0.50, min(1.50, float(pitch))),
+            "tail": max(0.50, min(1.60, float(tail))),
+            "volume": max(0.50, min(1.50, float(volume))),
+        }
+
+    def profile_controls(self) -> dict[str, dict[str, float]]:
+        return {name: dict(values) for name, values in self._profile_controls.items()}
 
     def play(self, event: SurgeEvent) -> None:
         if not self.enabled:
@@ -269,6 +308,13 @@ class SoundEngine:
 
     def _activate_flutter(self, event: SurgeEvent) -> None:
         duration, pulse_rate, amplitude, carrier_hz = self.flutter_parameters(event)
+        self._active_profile = self.profile_for_reason(event.reason)
+        controls = self._profile_controls[self._active_profile]
+        self._profile_pitch_scale = controls["pitch"]
+        self._profile_tail_scale = controls["tail"]
+        duration *= self._profile_tail_scale
+        amplitude *= controls["volume"]
+        carrier_hz *= self._profile_pitch_scale
         self._flutter_total = max(1, int(duration * self.SAMPLE_RATE))
         self._flutter_remaining = self._flutter_total
         self._flutter_rate = pulse_rate
@@ -277,6 +323,14 @@ class SoundEngine:
         self._flutter_mode = event.reason
         boost_part = max(0.0, min(1.0, event.boost_bar / 0.85))
         rpm_part = max(0.0, min(1.0, (event.rpm - 1_800.0) / 5_400.0))
+        self._release_load_mix = max(0.0, min(1.0, (event.boost_bar - 0.15) / 0.30))
+        drop_depth = max(0.0, min(1.0, (event.throttle_drop - 0.08) / 0.82))
+        lift_speed = max(0.0, min(1.0, event.lift_rate / 6.0))
+        self._release_depth = max(0.0, min(1.0, drop_depth * 0.75 + lift_speed * 0.25))
+        high_load_mix = max(0.0, min(1.0, (event.boost_bar - 0.45) / 0.25))
+        pulse_extent = self._release_depth * (0.65 + high_load_mix * 0.35)
+        self._surge_measured_pulse_limit = 3 + round(9 * pulse_extent)
+        self._surge_modeled_tail_count = 1 + round(3 * self._release_depth)
         self._recorded_flutter_position = 0.0
         # A charged compressor produces a noticeably higher-pitched, thinner
         # "shu-tu-tu" than a low-pressure whoosh. Speeding the real recording
@@ -287,10 +341,14 @@ class SoundEngine:
         self._recorded_flutter_gate_left = 0.0
         self._recorded_flutter_gate_right = 0.0
         self._compressor_air_position = 0.0
-        self._compressor_air_rate = 1.00 + rpm_part * 0.12 + boost_part * 0.10
+        self._compressor_air_rate = (
+            1.00 + rpm_part * 0.12 + boost_part * 0.10
+        ) * self._profile_pitch_scale ** 0.20
         self._surge_pulse_wait = int(0.010 * self.SAMPLE_RATE)
         self._surge_pulse_index = 0
-        self._surge_pulse_scale = 1.14 - rpm_part * 0.12 - boost_part * 0.20
+        self._surge_pulse_scale = (
+            1.14 - rpm_part * 0.12 - boost_part * 0.20
+        ) * self._profile_tail_scale
         self._surge_pulse_age = int(1.0 * self.SAMPLE_RATE)
         self._surge_pulse_strength = 0.0
         self._surge_tail_output_scale = 1.0
@@ -306,7 +364,14 @@ class SoundEngine:
             release_clip = self._reference_release_clips.get("throttle_lift")
         # Never squeeze a complete recording into a short simulated event.
         # A brief lift simply plays less of the native-rate recording.
-        self._reference_release_rate = 0.96 + rpm_part * 0.08 + boost_part * 0.04
+        self._reference_release_rate = max(
+            0.75,
+            min(
+                1.25,
+                (0.96 + rpm_part * 0.08 + boost_part * 0.04)
+                * self._profile_pitch_scale,
+            ),
+        )
         if event.reason == "valve_release":
             # The supplied clip contains engine/road content that overwhelms
             # a tiny 0.01-0.09 bar release. Keep that range purely procedural,
@@ -314,8 +379,13 @@ class SoundEngine:
             # a sudden timbre/volume jump.
             reference_mix = max(0.0, min(1.0, (event.boost_bar - 0.09) / 0.07))
             self._reference_release_gain = (0.34 + amplitude * 0.78) * reference_mix
+        elif event.reason == "pressure_release":
+            reference_mix = max(0.0, min(1.0, (event.boost_bar - 0.18) / 0.20))
+            self._reference_release_gain = (0.24 + amplitude * 0.52) * reference_mix
         elif release_clip is not None or event.reason in {"throttle_lift", "clutch"}:
             self._reference_release_gain = 0.34 + amplitude * 0.78
+            if event.reason == "throttle_lift":
+                self._reference_release_gain *= 0.25 + self._release_depth * 0.75
         else:
             self._reference_release_gain = 0.0
         self._release_air = 0.0
@@ -441,12 +511,21 @@ class SoundEngine:
                     # Low charge: a short plosive "pou". Medium charge: a
                     # broader filtered-air "pssh". These are pressure-release
                     # voices, not truncated compressor-flutter samples.
-                    attack = min(1.0, progress * (55.0 if self._flutter_mode == "valve_release" else 32.0))
-                    tail_power = 2.4 if self._flutter_mode == "valve_release" else 1.35
+                    if self._flutter_mode == "valve_release":
+                        attack_rate = 55.0
+                        tail_power = 2.4
+                    else:
+                        attack_rate = 40.0 - self._release_load_mix * 12.0
+                        tail_power = 1.70 - self._release_load_mix * 0.65
+                    attack = min(1.0, progress * attack_rate)
                     envelope = attack * max(0.0, 1.0 - progress) ** tail_power
                     self._noise_seed = (1_664_525 * self._noise_seed + 1_013_904_223) & 0xFFFFFFFF
                     raw_noise = self._noise_seed / 0xFFFFFFFF * 2.0 - 1.0
-                    air_alpha = 0.11 if self._flutter_mode == "valve_release" else 0.19
+                    air_alpha = (
+                        0.11
+                        if self._flutter_mode == "valve_release"
+                        else 0.14 + self._release_load_mix * 0.12
+                    )
                     self._release_air += air_alpha * (raw_noise - self._release_air)
                     airy = self._release_air - self._release_air_previous * 0.72
                     self._release_air_previous = self._release_air
@@ -460,7 +539,16 @@ class SoundEngine:
                     if self._flutter_mode == "valve_release":
                         voice = tone * 0.95 + airy * 0.42
                     else:
-                        voice = tone * 0.55 + airy * 0.85
+                        tone_mix = 0.62 - self._release_load_mix * 0.30
+                        air_mix = 0.70 + self._release_load_mix * 0.65
+                        voice = tone * tone_mix + airy * air_mix
+                        # A medium-load release has a second, rounded pressure
+                        # collapse: clearly "psh-ko", not a longer low POU and
+                        # not yet a high-load flutter train.
+                        secondary = math.exp(-((progress - 0.56) / 0.11) ** 2)
+                        voice += (
+                            tone * 0.58 + airy * 0.24
+                        ) * secondary * (0.25 + self._release_depth * 0.75)
                     cancel_fade = min(1.0, self._flutter_remaining / max(1, int(0.025 * self.SAMPLE_RATE)))
                     flutter_left = voice * self._flutter_amplitude * envelope * cancel_fade
                     flutter_right = voice * self._flutter_amplitude * envelope * cancel_fade * 0.96
@@ -595,7 +683,7 @@ class SoundEngine:
         # Tiny deterministic variation avoids a sampler-machine repetition,
         # while the strict bounds prevent the old compressed/helium effect.
         variation = ((pulse_number * 37) % 7 - 3) * 0.006
-        rate = max(0.90, min(1.10, self._reference_release_rate + variation))
+        rate = max(0.75, min(1.25, self._reference_release_rate + variation))
         gain = self._reference_release_gain * strength
         self._reference_active_pulses.append((pulse, 0.0, rate, gain))
 
@@ -638,11 +726,17 @@ class SoundEngine:
         """
         assert self._compressor_air is not None
         if not self._flutter_canceling:
-            measured_pulse_count = len(self._reference_surge_pulses)
+            measured_pulse_count = min(
+                len(self._reference_surge_pulses), self._surge_measured_pulse_limit,
+            )
             # Four low-level modeled catches continue after the twelve unique
             # recorded grains. They fade the rhythm itself without looping a
             # recording (which previously became a mechanical "ga-ga-ga").
-            maximum_pulses = measured_pulse_count + 4 if measured_pulse_count else 12
+            maximum_pulses = (
+                measured_pulse_count + self._surge_modeled_tail_count
+                if measured_pulse_count
+                else 8 + self._surge_modeled_tail_count
+            )
             source_pulses_available = self._surge_pulse_index < maximum_pulses
             pressure_can_recatch = progress < 0.92
             if self._surge_pulse_wait <= 0 and source_pulses_available and pressure_can_recatch:
@@ -653,8 +747,13 @@ class SoundEngine:
                     strength = (1.0 - pulse_fraction) ** 0.72 * pressure_strength
                     self._surge_tail_output_scale = 1.0
                 else:
-                    modeled_tail = (0.30, 0.20, 0.12, 0.06)
-                    modeled_output = (0.90, 0.75, 0.55, 0.08)
+                    tail_profiles = {
+                        1: ((0.035,), (0.10,)),
+                        2: ((0.18, 0.04), (0.72, 0.10)),
+                        3: ((0.24, 0.10, 0.035), (0.82, 0.48, 0.10)),
+                        4: ((0.30, 0.20, 0.12, 0.06), (0.90, 0.75, 0.55, 0.08)),
+                    }
+                    modeled_tail, modeled_output = tail_profiles[self._surge_modeled_tail_count]
                     tail_index = min(pulse_number - measured_pulse_count, len(modeled_tail) - 1)
                     strength = modeled_tail[tail_index] * pressure_strength
                     self._surge_tail_output_scale = modeled_output[tail_index]
@@ -667,7 +766,7 @@ class SoundEngine:
                     360.0,
                     self._flutter_carrier_hz * 0.30 * (0.94 ** pulse_number),
                 )
-                if pulse_number < measured_pulse_count:
+                if pulse_number < measured_pulse_count and self._release_depth >= 0.25:
                     self._trigger_reference_surge_pulse(pulse_number, strength)
                 self._recorded_flutter_pulses += 1
                 # Measured from the supplied R34 reference: a flutter event
@@ -714,7 +813,11 @@ class SoundEngine:
         self._compressor_air_position = (self._compressor_air_position + self._compressor_air_rate) % source_frames
 
         age_seconds = self._surge_pulse_age / self.SAMPLE_RATE
-        attack_seconds = 0.0023 if self._surge_pulse_index <= 1 else 0.0034
+        partial_softness = 1.0 - self._release_depth
+        attack_seconds = (
+            (0.0023 if self._surge_pulse_index <= 1 else 0.0034)
+            + partial_softness * 0.0065
+        )
         decay_seconds = 0.034 - min(0.010, max(0, self._surge_pulse_index - 1) * 0.0012)
         pulse_envelope = (
             (1.0 - math.exp(-age_seconds / attack_seconds))
@@ -742,9 +845,14 @@ class SoundEngine:
         self._surge_hiss_left += hiss_smoothing * (hiss_left / 32768.0 - self._surge_hiss_left)
         self._surge_hiss_right += hiss_smoothing * (hiss_right / 32768.0 - self._surge_hiss_right)
         first_release = 1.0 if self._surge_pulse_index <= 1 else 0.0
-        hiss_mix = 0.22 + first_release * 0.95 + max(0.0, 0.22 - progress) * 0.55
+        transient_scale = 0.22 + self._release_depth * 0.78
+        hiss_mix = (
+            0.22
+            + first_release * 0.95 * transient_scale
+            + max(0.0, 0.22 - progress) * 0.55
+        )
         body_mix = 2.75 + progress * 0.95
-        pressure_front = 1.25 + 4.8 * math.exp(-age_seconds / 0.012)
+        pressure_front = 1.05 + 4.8 * transient_scale * math.exp(-age_seconds / 0.012)
         fade = min(1.0, self._flutter_remaining / max(1, int(0.035 * self.SAMPLE_RATE)))
         pressure_tail = max(0.0, min(1.0, (1.0 - progress) / 0.20))
         pressure_tail = pressure_tail * pressure_tail * (3.0 - 2.0 * pressure_tail)
@@ -759,6 +867,10 @@ class SoundEngine:
             * pressure_tail
             * self._surge_tail_output_scale
         )
+        if self._release_depth < 0.25:
+            # With recorded transients disabled, restore only the smooth air
+            # body so a shallow lift remains audible over the engine bed.
+            gain *= 1.0 + (0.25 - self._release_depth) / 0.25 * 1.8
         left_voice = (
             self._surge_hiss_left * hiss_mix
             + self._surge_body_left[1] * body_mix

@@ -100,6 +100,7 @@ class SoundEngineTests(unittest.TestCase):
         engine = SoundEngine(enabled=False, engine_enabled=False)
         try:
             engine.enabled = True
+            engine.set_profile_controls("high", pitch=1.0, tail=1.0, volume=1.0)
             self.assertIsNotNone(engine._compressor_air)
             self.assertIsNotNone(engine._compressor_air_hiss)
             self.assertEqual(len(engine._reference_spool_bands), 6)
@@ -187,24 +188,96 @@ class SoundEngineTests(unittest.TestCase):
         try:
             engine.enabled = True
             pou = SurgeEvent(0.12, 2_300, 0.05, 0.22, 1.2, "valve_release")
-            psh = SurgeEvent(0.34, 3_200, 0.22, 0.50, 2.8, "pressure_release")
+            psh = SurgeEvent(0.40, 3_600, 0.30, 0.58, 3.2, "pressure_release")
             pou_params = engine.flutter_parameters(pou)
             psh_params = engine.flutter_parameters(psh)
             self.assertGreater(psh_params[0], pou_params[0])
             self.assertGreater(psh_params[2], pou_params[2])
             self.assertLess(pou_params[3], 45.0)
-            self.assertLess(psh_params[3], 60.0)
-            tenth_bar = SurgeEvent(0.22, 2_700, 0.10, 0.38, 2.0, "pressure_release")
+            self.assertGreater(psh_params[3], pou_params[3] * 5.0)
+            tenth_bar = SurgeEvent(0.22, 2_700, 0.10, 0.38, 2.0, "valve_release")
             self.assertLess(engine.flutter_parameters(tenth_bar)[3], 45.0)
             engine._activate_flutter(pou)
-            self.assertGreaterEqual(engine._reference_release_rate, 0.90)
-            self.assertLessEqual(engine._reference_release_rate, 1.10)
+            self.assertGreaterEqual(engine._reference_release_rate, 0.75)
+            self.assertLessEqual(engine._reference_release_rate, 0.82)
             pou_pcm = engine.render_chunk(2_048)
             engine._activate_flutter(psh)
-            self.assertGreaterEqual(engine._reference_release_rate, 0.90)
-            self.assertLessEqual(engine._reference_release_rate, 1.10)
+            self.assertGreaterEqual(engine._reference_release_rate, 0.88)
+            self.assertLessEqual(engine._reference_release_rate, 1.02)
             psh_pcm = engine.render_chunk(2_048)
             self.assertNotEqual(pou_pcm, psh_pcm)
+        finally:
+            engine.close()
+
+    def test_high_load_controls_pulse_count_and_fade_length(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            medium_high = SurgeEvent(0.52, 4_500, 0.40, 0.75, 4.5, "throttle_lift")
+            full_high = SurgeEvent(0.88, 6_300, 0.72, 0.95, 6.5, "throttle_lift")
+            engine._activate_flutter(medium_high)
+            medium_counts = (
+                engine._surge_measured_pulse_limit,
+                engine._surge_modeled_tail_count,
+                engine._flutter_total,
+            )
+            engine._activate_flutter(full_high)
+            high_counts = (
+                engine._surge_measured_pulse_limit,
+                engine._surge_modeled_tail_count,
+                engine._flutter_total,
+            )
+            self.assertGreater(high_counts[0], medium_counts[0])
+            self.assertGreater(high_counts[1], medium_counts[1])
+            self.assertGreater(high_counts[2], medium_counts[2])
+        finally:
+            engine.close()
+
+    def test_partial_high_load_lift_is_shorter_and_has_fewer_catches(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            partial = SurgeEvent(0.40, 5_800, 0.68, 0.18, 1.4, "throttle_lift")
+            full = SurgeEvent(0.88, 5_800, 0.68, 0.92, 6.0, "throttle_lift")
+            partial_duration = engine.flutter_parameters(partial)[0]
+            full_duration = engine.flutter_parameters(full)[0]
+            engine._activate_flutter(partial)
+            partial_pulses = (
+                engine._surge_measured_pulse_limit + engine._surge_modeled_tail_count
+            )
+            engine._activate_flutter(full)
+            full_pulses = engine._surge_measured_pulse_limit + engine._surge_modeled_tail_count
+            self.assertLess(partial_duration, full_duration * 0.65)
+            self.assertLess(partial_pulses, full_pulses)
+        finally:
+            engine.close()
+
+    def test_shallow_high_load_lift_avoids_hard_recorded_first_pulse(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            engine.enabled = True
+            shallow = SurgeEvent(0.35, 5_800, 0.68, 0.14, 0.8, "throttle_lift")
+            engine._activate_flutter(shallow)
+            pcm = engine.render_chunk(min(engine._flutter_total, int(0.12 * engine.SAMPLE_RATE)))
+            values = array("h")
+            values.frombytes(pcm)
+            self.assertEqual(engine._reference_active_pulses, [])
+            self.assertGreater(max(abs(value) for value in values), 700)
+            self.assertLess(max(abs(value) for value in values), 4_000)
+        finally:
+            engine.close()
+
+    def test_profile_controls_change_pitch_tail_and_volume(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            event = SurgeEvent(0.40, 3_600, 0.30, 0.58, 3.2, "pressure_release")
+            engine.set_profile_controls("medium", pitch=1.0, tail=1.0, volume=1.0)
+            engine._activate_flutter(event)
+            baseline = (engine._flutter_carrier_hz, engine._flutter_total, engine._flutter_amplitude)
+            engine.set_profile_controls("medium", pitch=1.4, tail=1.5, volume=1.3)
+            engine._activate_flutter(event)
+            tuned = (engine._flutter_carrier_hz, engine._flutter_total, engine._flutter_amplitude)
+            self.assertAlmostEqual(tuned[0], baseline[0] * 1.4)
+            self.assertAlmostEqual(tuned[1], baseline[1] * 1.5, delta=1)
+            self.assertAlmostEqual(tuned[2], baseline[2] * 1.3)
         finally:
             engine.close()
 

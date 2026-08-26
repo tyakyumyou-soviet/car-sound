@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .audio import SoundEngine
-from .detector import BackTurboDetector
+from .detector import BackTurboDetector, SurgeEvent
 from .model import DriverInput, OBDFrame
 from .simulator import VirtualVehicle
 
@@ -30,6 +30,7 @@ main{max-width:1120px;margin:auto;padding:28px}.header{display:flex;justify-cont
 .events{border-top:1px solid var(--line);margin-top:26px;padding-top:16px;min-height:110px}.event{font:11px ui-monospace;color:var(--muted);padding:5px 0}.event:first-child{color:var(--orange)}
 .control-grid{display:grid;grid-template-columns:85px 1fr;gap:18px;margin-top:20px}.pedal{height:220px;writing-mode:vertical-lr;direction:rtl;accent-color:var(--orange);width:42px}.throttle-value{font:700 24px ui-monospace;margin-top:6px}.toggle{display:flex;align-items:center;gap:9px;padding:10px 0;color:var(--text);font-size:14px}.toggle input{accent-color:var(--cyan);width:18px;height:18px}.gears{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px}.gear{border:1px solid var(--line);background:#1b232c;color:var(--text);border-radius:7px;padding:10px;font:700 15px ui-monospace;cursor:pointer}.gear.active{background:var(--cyan);color:#071016;border-color:var(--cyan)}
 .status{display:flex;justify-content:space-between;gap:12px;margin-top:16px;padding:14px 18px;border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--muted);font:11px ui-monospace}.ready{color:var(--cyan)}kbd{border:1px solid #475360;background:#202832;border-radius:4px;padding:2px 5px;font:10px ui-monospace;color:#cbd5df}
+.profiles{margin-top:22px;display:grid;gap:8px}.profile{border:1px solid var(--line);border-radius:8px;padding:10px;background:#0d1319}.profile-head{display:flex;align-items:center;justify-content:space-between;font:700 11px ui-monospace}.preview{border:1px solid #3a4a58;background:#1b2630;color:var(--cyan);border-radius:5px;padding:5px 8px;cursor:pointer}.profile-row{display:grid;grid-template-columns:48px 1fr 42px;gap:7px;align-items:center;margin-top:7px;color:var(--muted);font:10px ui-monospace}.profile-row input{width:100%;accent-color:var(--orange)}
 @media(max-width:760px){main{padding:14px}.telemetry{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.header{align-items:start}.source{display:none}}
 </style>
 </head>
@@ -53,6 +54,11 @@ main{max-width:1120px;margin:auto;padding:28px}.header{display:flex;justify-cont
   <div><input id="pedal" class="pedal" type="range" min="0" max="100" value="0" aria-label="アクセル開度"><div id="pedalValue" class="throttle-value">0%</div></div>
   <div><label class="toggle"><input id="clutch" type="checkbox">クラッチ <kbd>C</kbd></label><label class="toggle"><input id="brake" type="checkbox">ブレーキ <kbd>S / ↓</kbd></label><label class="toggle"><input id="engineSound" type="checkbox" checked>エンジン音 ON</label><label class="toggle"><input id="sound" type="checkbox" checked>バックタービン音 ON</label>
    <div class="label" style="margin-top:20px">GEAR <kbd>0—6</kbd></div><div id="gears" class="gears"></div>
+   <div class="profiles"><div class="label">LOAD SOUND TUNING</div>
+    <div class="profile" data-profile="small"><div class="profile-head"><span>SMALL · POU</span><button class="preview">試聴</button></div><div class="profile-row"><span>音程</span><input data-key="pitch" type="range" min="50" max="150" value="70"><b>70%</b></div><div class="profile-row"><span>余韻</span><input data-key="tail" type="range" min="50" max="160" value="65"><b>65%</b></div><div class="profile-row"><span>音量</span><input data-key="volume" type="range" min="50" max="150" value="85"><b>85%</b></div></div>
+    <div class="profile" data-profile="medium"><div class="profile-head"><span>MEDIUM · PSH-KO</span><button class="preview">試聴</button></div><div class="profile-row"><span>音程</span><input data-key="pitch" type="range" min="50" max="150" value="92"><b>92%</b></div><div class="profile-row"><span>余韻</span><input data-key="tail" type="range" min="50" max="160" value="95"><b>95%</b></div><div class="profile-row"><span>音量</span><input data-key="volume" type="range" min="50" max="150" value="100"><b>100%</b></div></div>
+    <div class="profile" data-profile="high"><div class="profile-head"><span>HIGH · SHU-TU-TU</span><button class="preview">試聴</button></div><div class="profile-row"><span>音程</span><input data-key="pitch" type="range" min="50" max="150" value="110"><b>110%</b></div><div class="profile-row"><span>余韻</span><input data-key="tail" type="range" min="50" max="160" value="100"><b>100%</b></div><div class="profile-row"><span>音量</span><input data-key="volume" type="range" min="50" max="150" value="115"><b>115%</b></div></div>
+   </div>
   </div></div>
  </section>
 </div>
@@ -64,6 +70,7 @@ async function send(patch){Object.assign(controls,patch);try{await fetch('/api/c
 function showControls(){ $('pedal').value=Math.round(controls.throttle*100);$('pedalValue').textContent=Math.round(controls.throttle*100)+'%';$('clutch').checked=controls.clutch_pressed;$('brake').checked=controls.brake_pressed;document.querySelectorAll('.gear').forEach(x=>x.classList.toggle('active',+x.dataset.gear===controls.gear)) }
 for(let g=0;g<=6;g++){let b=document.createElement('button');b.className='gear';b.dataset.gear=g;b.textContent=g===0?'N':g;b.onclick=()=>{controls.gear=g;showControls();send({gear:g})};$('gears').appendChild(b)}showControls();
 $('pedal').oninput=e=>{controls.throttle=+e.target.value/100;$('pedalValue').textContent=e.target.value+'%';send({throttle:controls.throttle})};$('clutch').onchange=e=>send({clutch_pressed:e.target.checked});$('brake').onchange=e=>send({brake_pressed:e.target.checked});$('engineSound').onchange=e=>send({engine_sound:e.target.checked});$('sound').onchange=e=>send({sound:e.target.checked});
+document.querySelectorAll('.profile').forEach(card=>{const profile=card.dataset.profile;const values=()=>Object.fromEntries([...card.querySelectorAll('input')].map(x=>[x.dataset.key,+x.value/100]));card.querySelectorAll('input').forEach(input=>{input.oninput=()=>input.nextElementSibling.textContent=input.value+'%';input.onchange=()=>send({profile_setting:{profile,...values()}})});card.querySelector('.preview').onclick=()=>{controls.throttle=0;showControls();send({throttle:0,preview_profile:profile})}});
 const isAccel=k=>k==='w'||k==='arrowup';const isBrake=k=>k==='s'||k==='arrowdown';
 addEventListener('keydown',e=>{let k=e.key.toLowerCase();if(down.has(k))return;down.add(k);if(isAccel(k)){e.preventDefault();controls.throttle=1;showControls();send({throttle:1})}else if(isBrake(k)){e.preventDefault();controls.brake_pressed=true;showControls();send({brake_pressed:true})}else if(k==='c'){controls.clutch_pressed=true;showControls();send({clutch_pressed:true})}else if(k===' '){e.preventDefault();controls.throttle=0;showControls();send({throttle:0})}else if(k==='n'){controls.gear=0;showControls();send({gear:0})}else if(/^[0-6]$/.test(k)){controls.gear=+k;showControls();send({gear:+k})}});
 addEventListener('keyup',e=>{let k=e.key.toLowerCase();down.delete(k);if(isAccel(k)){controls.throttle=0;showControls();send({throttle:0})}else if(isBrake(k)){controls.brake_pressed=false;showControls();send({brake_pressed:false})}else if(k==='c'){controls.clutch_pressed=false;showControls();send({clutch_pressed:false})}});
@@ -101,10 +108,10 @@ class SimulationEngine:
                 if event is not None:
                     self.sound.play(event)
                     reason = {
-                        "clutch": "CLUTCH",
-                        "valve_release": "POU RELEASE",
-                        "pressure_release": "PSH RELEASE",
-                    }.get(event.reason, "THROTTLE LIFT")
+                        "clutch": "HIGH · CLUTCH FLUTTER",
+                        "valve_release": "SMALL · LOW POU",
+                        "pressure_release": "MEDIUM · PSH-KO",
+                    }.get(event.reason, "HIGH · SHU-TU-TU")
                     message = (
                         f"SURGE {event.intensity * 100:02.0f}% · {reason} · "
                         f"{event.rpm:,.0f} rpm · {event.boost_bar:+.2f} bar · "
@@ -129,6 +136,25 @@ class SimulationEngine:
                 self.sound.enabled = bool(data["sound"])
             if "engine_sound" in data:
                 self.sound.engine_enabled = bool(data["engine_sound"])
+            if "profile_setting" in data and isinstance(data["profile_setting"], dict):
+                setting = data["profile_setting"]
+                self.sound.set_profile_controls(
+                    str(setting.get("profile", "")),
+                    pitch=float(setting.get("pitch", 1.0)),
+                    tail=float(setting.get("tail", 1.0)),
+                    volume=float(setting.get("volume", 1.0)),
+                )
+            if "preview_profile" in data:
+                profile = str(data["preview_profile"])
+                previews = {
+                    "small": SurgeEvent(0.18, 2_600, 0.10, 0.35, 2.0, "valve_release"),
+                    "medium": SurgeEvent(0.48, 3_800, 0.30, 0.62, 3.5, "pressure_release"),
+                    "high": SurgeEvent(0.86, 6_100, 0.68, 0.92, 6.0, "throttle_lift"),
+                }
+                event = previews.get(profile)
+                if event is not None:
+                    self.sound.play(event)
+                    self.status = f"PREVIEW · {profile.upper()}"
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -139,6 +165,7 @@ class SimulationEngine:
                 "boost_bar": frame.boost_bar, "events": list(self.events),
                 "status": self.status, "audio_available": self.sound.available,
                 "audio_backend": self.sound.backend,
+                "profile_controls": self.sound.profile_controls(),
             }
 
     def close(self) -> None:

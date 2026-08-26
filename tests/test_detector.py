@@ -20,6 +20,32 @@ class DetectorTests(unittest.TestCase):
         self.assertGreater(event.boost_bar, 0.1)
         self.assertGreater(event.throttle_drop, 0.5)
 
+    def test_load_bands_select_three_distinct_release_voices(self) -> None:
+        cases = (
+            (0.10, 2_400.0, "valve_release"),
+            (0.30, 3_600.0, "pressure_release"),
+            (0.62, 5_500.0, "throttle_lift"),
+        )
+        for boost, rpm, expected in cases:
+            detector = BackTurboDetector()
+            detector.update(frame(1.0, 0.88, rpm=rpm, boost=boost))
+            event = detector.update(frame(1.1, 0.02, rpm=rpm - 100, boost=0.0))
+            self.assertIsNotNone(event)
+            assert event is not None
+            self.assertEqual(event.reason, expected)
+
+    def test_partial_lift_preserves_charge_for_following_full_lift(self) -> None:
+        detector = BackTurboDetector()
+        detector.update(frame(1.00, 0.90, rpm=5_500, boost=0.65))
+        partial = detector.update(frame(1.10, 0.68, rpm=5_400, boost=0.55))
+        self.assertIsNotNone(partial)
+        assert partial is not None
+        self.assertLess(partial.throttle_drop, 0.30)
+        full = detector.update(frame(1.22, 0.02, rpm=5_200, boost=0.20))
+        self.assertIsNotNone(full)
+        assert full is not None
+        self.assertGreater(full.throttle_drop, 0.60)
+
     def test_does_not_trigger_without_boost(self) -> None:
         detector = BackTurboDetector()
         detector.update(frame(1.0, 0.85, boost=0.0))
