@@ -35,3 +35,19 @@ The files are decoded locally and used as layers in a realtime simulation. They 
 - This recording has no declared redistribution license in the supplied file.
   Keep it local and do not push or redistribute it without permission from the
   rights holder.
+
+## User-supplied multi-turbo reference
+
+- `screen_recording_reference.wav` is extracted locally from
+  `/Users/tyakyumyou/Downloads/ScreenRecording_08-26-2026 22-56-14_1.MOV`.
+- The user specifically selected the first sound. `turbo_types_intro_reference.wav`
+  contains 0.00–6.72 seconds. `turbo_intro_accel_reference.wav` isolates the
+  first 0.05–1.80 second spool-up, while `turbo_intro_coast_reference.wav`
+  isolates the second clean 5.53–6.28 second rundown.
+- Eight short acceleration grains and seven reverse-indexed rundown grains are
+  blended by simulated spool. The source audio itself is never reversed or
+  globally time-compressed.
+- The simulator uses the selected intro only for acceleration/spool character. It
+  is not used as lift-off or blow-off audio.
+- These files have no declared redistribution license in the supplied video.
+  They remain gitignored and must not be pushed without permission.

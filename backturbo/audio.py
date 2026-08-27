@@ -58,8 +58,10 @@ class SoundEngine:
         self._engine_phase = 0.0
         self._whine_phase_low = 0.0
         self._whine_phase = 0.0
+        self._whine_phase_detuned = 0.0
         self._whine_phase_secondary = 0.0
         self._turbo_spool = 0.0
+        self._turbo_coast_mix = 0.0
         self._turbo_whine_hz = 720.0
         self._turbo_air = 0.0
         self._turbo_air_low = 0.0
@@ -67,6 +69,10 @@ class SoundEngine:
         self._whine_noise_seed = 0x34_86_15
         self._reference_spool_bands: dict[int, array] = {}
         self._reference_spool_phases: dict[int, float] = {}
+        self._turbo_types_spool_bands: dict[int, array] = {}
+        self._turbo_types_spool_phases: dict[int, float] = {}
+        self._turbo_types_coast_bands: dict[int, array] = {}
+        self._turbo_types_coast_phases: dict[int, float] = {}
         self._reference_release_clips: dict[str, array] = {}
         self._reference_surge_pulses: list[array] = []
         self._reference_active_pulses: list[tuple[array, float, float, float]] = []
@@ -466,14 +472,31 @@ class SoundEngine:
                 rpm_spool = max(0.0, min(1.0, (rpm - 1_500.0) / 5_700.0))
                 boost_spool = max(0.0, min(1.0, (boost + 0.08) / 0.90))
                 target_spool = boost_spool * 0.72 + rpm_spool * throttle * 0.28
-                spool_tau = 0.16 if target_spool > self._turbo_spool else 0.34
+                if target_spool > self._turbo_spool:
+                    # The selected first reference is a conventional
+                    # single-scroll-style pull: quiet initial loading followed
+                    # by a much quicker whistle rise once the rotor is moving.
+                    spool_tau = 0.30 if self._turbo_spool < 0.28 else 0.13
+                else:
+                    spool_tau = 0.42
                 spool_alpha = 1.0 - math.exp(-1.0 / (self.SAMPLE_RATE * spool_tau))
                 self._turbo_spool += spool_alpha * (target_spool - self._turbo_spool)
-                # The supplied GT-R clip does not contain one needle-thin
-                # 5-6 kHz sine.  Its accelerating whistle is a moving bundle:
-                # a strong 2-3 kHz ridge and two broader lower partials,
-                # all surrounded by compressor-air texture.
-                self._turbo_whine_hz = 720.0 + 2_300.0 * self._turbo_spool ** 1.35 + rpm_spool * 180.0
+                coast_target = 1.0 if (
+                    self._turbo_spool > 0.08
+                    and (target_spool + 0.01 < self._turbo_spool or throttle < 0.12)
+                ) else 0.0
+                coast_tau = 0.045 if coast_target > self._turbo_coast_mix else 0.12
+                coast_alpha = 1.0 - math.exp(-1.0 / (self.SAMPLE_RATE * coast_tau))
+                self._turbo_coast_mix += coast_alpha * (coast_target - self._turbo_coast_mix)
+                # The supplied multi-turbo reference has a curved main ridge
+                # rising from roughly 1.1 kHz into the 4-5 kHz region, plus a
+                # weaker upper ridge.  The steeper exponent preserves spool
+                # lag at low pressure instead of making idle sound electric.
+                self._turbo_whine_hz = (
+                    1_050.0
+                    + 4_000.0 * self._turbo_spool ** 1.45
+                    + rpm_spool * 280.0
+                )
                 self._whine_noise_seed = (
                     1_664_525 * self._whine_noise_seed + 1_013_904_223
                 ) & 0xFFFFFFFF
@@ -486,22 +509,37 @@ class SoundEngine:
                 self._whine_phase = (
                     self._whine_phase + 2.0 * math.pi * whine_hz / self.SAMPLE_RATE
                 ) % (2.0 * math.pi)
+                self._whine_phase_detuned = (
+                    self._whine_phase_detuned
+                    + 2.0 * math.pi * whine_hz * 1.011 / self.SAMPLE_RATE
+                ) % (2.0 * math.pi)
                 self._whine_phase_secondary = (
                     self._whine_phase_secondary
-                    + 2.0 * math.pi * whine_hz * 0.75 / self.SAMPLE_RATE
+                    + 2.0 * math.pi * whine_hz * 1.72 / self.SAMPLE_RATE
                 ) % (2.0 * math.pi)
                 self._turbo_air_low += 0.018 * (raw_turbo_air - self._turbo_air_low)
                 turbulent_air = raw_turbo_air - self._turbo_air_low
                 self._turbo_air += 0.34 * (turbulent_air - self._turbo_air)
-                spool_level = self._turbo_spool ** 1.15 * (0.35 + throttle * 0.65)
+                drive_level = min(1.0, 0.35 + throttle * 0.65 + self._turbo_coast_mix * 0.18)
+                spool_level = self._turbo_spool ** 1.15 * drive_level
                 turbine_tone = (
-                    math.sin(self._whine_phase_low + self._turbo_air * 0.08) * 0.18
-                    + math.sin(self._whine_phase + self._turbo_air * 0.13) * 0.46
-                    + math.sin(self._whine_phase_secondary - self._turbo_air * 0.09) * 0.30
+                    math.sin(self._whine_phase_low + self._turbo_air * 0.08) * 0.24
+                    + math.sin(self._whine_phase + self._turbo_air * 0.13) * 0.31
+                    + math.sin(self._whine_phase_detuned - self._turbo_air * 0.07) * 0.13
+                    + math.sin(self._whine_phase_secondary - self._turbo_air * 0.11) * 0.11
                 )
-                whine = turbine_tone * spool_level * 0.040 + self._turbo_air * spool_level * 0.010
+                whine = turbine_tone * spool_level * 0.026 + self._turbo_air * spool_level * 0.013
                 recorded_spool = self._render_reference_spool(self._turbo_spool)
-                whine += recorded_spool * spool_level * 0.32
+                accelerating_spool = self._render_turbo_types_spool(self._turbo_spool)
+                coast_spool = self._render_turbo_types_coast(self._turbo_spool)
+                turbo_types_spool = (
+                    accelerating_spool * (1.0 - self._turbo_coast_mix)
+                    + coast_spool * self._turbo_coast_mix
+                )
+                real_spool_gate = max(0.0, min(1.0, (self._turbo_spool - 0.08) / 0.22))
+                real_spool_gate = real_spool_gate * real_spool_gate * (3.0 - 2.0 * real_spool_gate)
+                whine += recorded_spool * spool_level * 0.22
+                whine += turbo_types_spool * spool_level * real_spool_gate * 0.27
 
             flutter_left = 0.0
             flutter_right = 0.0
@@ -619,9 +657,42 @@ class SoundEngine:
 
     def _render_reference_spool(self, spool: float) -> float:
         """Blend measured acceleration grains from the supplied R34 video."""
-        if not self._reference_spool_bands:
+        return self._render_spool_bank(
+            self._reference_spool_bands,
+            self._reference_spool_phases,
+            spool,
+            playback_rate=0.92 + spool * 0.20,
+        )
+
+    def _render_turbo_types_spool(self, spool: float) -> float:
+        """Blend the clean tonal rise measured in the multi-turbo reference."""
+        return self._render_spool_bank(
+            self._turbo_types_spool_bands,
+            self._turbo_types_spool_phases,
+            spool,
+            playback_rate=0.96 + spool * 0.12,
+        )
+
+    def _render_turbo_types_coast(self, spool: float) -> float:
+        """Blend measured rundown grains while the compressor retains inertia."""
+        return self._render_spool_bank(
+            self._turbo_types_coast_bands,
+            self._turbo_types_coast_phases,
+            spool,
+            playback_rate=0.95 + spool * 0.10,
+        )
+
+    @staticmethod
+    def _render_spool_bank(
+        bands: dict[int, array],
+        phases: dict[int, float],
+        spool: float,
+        *,
+        playback_rate: float,
+    ) -> float:
+        if not bands:
             return 0.0
-        keys = sorted(self._reference_spool_bands)
+        keys = sorted(bands)
         position = max(0.0, min(1.0, spool)) * (len(keys) - 1)
         lower_index = min(len(keys) - 1, int(position))
         upper_index = min(len(keys) - 1, lower_index + 1)
@@ -633,9 +704,9 @@ class SoundEngine:
             if weight <= 0.0:
                 continue
             key = keys[index]
-            loop = self._reference_spool_bands[key]
+            loop = bands[key]
             frames = len(loop) // 2
-            phase = self._reference_spool_phases[key]
+            phase = phases[key]
             frame = int(phase) % frames
             next_frame = (frame + 1) % frames
             fraction = phase - int(phase)
@@ -644,7 +715,7 @@ class SoundEngine:
             left = loop[base] * (1.0 - fraction) + loop[next_base] * fraction
             right = loop[base + 1] * (1.0 - fraction) + loop[next_base + 1] * fraction
             mixed += (left + right) * 0.5 / 32768.0 * weight
-            self._reference_spool_phases[key] = (phase + 0.92 + spool * 0.20) % frames
+            phases[key] = (phase + playback_rate) % frames
         return mixed
 
     def _render_reference_release(self) -> tuple[float, float]:
@@ -1089,6 +1160,51 @@ class SoundEngine:
             self._reference_spool_phases.clear()
             self._reference_release_clips.clear()
             self._reference_surge_pulses.clear()
+
+        turbo_types_path = self._assets / "turbo_intro_accel_reference.wav"
+        try:
+            if turbo_types_path.exists():
+                decoded_types = miniaudio.decode_file(
+                    str(turbo_types_path), output_format=miniaudio.SampleFormat.SIGNED16,
+                    nchannels=2, sample_rate=self.SAMPLE_RATE,
+                )
+                tonal_source = self._prepare_compressor_air(
+                    array("h", decoded_types.samples),
+                    highpass_hz=1_250.0, lowpass_hz=9_200.0, gain=1.55,
+                )
+                # The first example rises quickly after initial lag. Shorter
+                # grains preserve that rapid whistle sweep without smearing
+                # adjacent pitch regions together.
+                for index, center in enumerate((0.10, 0.32, 0.54, 0.76, 0.98, 1.20, 1.42, 1.64)):
+                    loop = self._extract_reference_loop(tonal_source, center, 0.13)
+                    if loop:
+                        self._turbo_types_spool_bands[index] = loop
+                        self._turbo_types_spool_phases[index] = 0.0
+        except Exception:
+            self._turbo_types_spool_bands.clear()
+            self._turbo_types_spool_phases.clear()
+
+        turbo_coast_path = self._assets / "turbo_intro_coast_reference.wav"
+        try:
+            if turbo_coast_path.exists():
+                decoded_coast = miniaudio.decode_file(
+                    str(turbo_coast_path), output_format=miniaudio.SampleFormat.SIGNED16,
+                    nchannels=2, sample_rate=self.SAMPLE_RATE,
+                )
+                coast_source = self._prepare_compressor_air(
+                    array("h", decoded_coast.samples),
+                    highpass_hz=1_250.0, lowpass_hz=9_200.0, gain=1.55,
+                )
+                # Source time runs high-to-low speed; reverse the center list
+                # so increasing dictionary index still means increasing spool.
+                for index, center in enumerate((0.68, 0.58, 0.48, 0.38, 0.28, 0.18, 0.08)):
+                    loop = self._extract_reference_loop(coast_source, center, 0.11)
+                    if loop:
+                        self._turbo_types_coast_bands[index] = loop
+                        self._turbo_types_coast_phases[index] = 0.0
+        except Exception:
+            self._turbo_types_coast_bands.clear()
+            self._turbo_types_coast_phases.clear()
 
         flutter_path = self._assets / "turbo_flutter.mp3"
         try:

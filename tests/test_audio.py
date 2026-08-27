@@ -56,8 +56,8 @@ class SoundEngineTests(unittest.TestCase):
             values = array("h")
             values.frombytes(pcm)
             self.assertGreater(engine._turbo_spool, 0.65)
-            self.assertGreater(engine._turbo_whine_hz, 2_300.0)
-            self.assertLess(engine._turbo_whine_hz, 3_300.0)
+            self.assertGreater(engine._turbo_whine_hz, 3_400.0)
+            self.assertLess(engine._turbo_whine_hz, 5_600.0)
             self.assertGreater(max(abs(value) for value in values), 600)
         finally:
             engine.close()
@@ -78,6 +78,24 @@ class SoundEngineTests(unittest.TestCase):
             audible.frombytes(engine.render_chunk(engine.SAMPLE_RATE // 2))
             self.assertLess(max(abs(value) for value in muted), 10)
             self.assertGreater(max(abs(value) for value in audible), 500)
+        finally:
+            engine.close()
+
+    def test_turbo_rundown_keeps_rotor_inertia_after_lift(self) -> None:
+        engine = SoundEngine(enabled=False, engine_enabled=False)
+        try:
+            engine.enabled = True
+            engine._target_rpm = 6_500
+            engine._target_throttle = 0.92
+            engine._target_boost = 0.70
+            engine.render_chunk(engine.SAMPLE_RATE)
+            charged_spool = engine._turbo_spool
+            engine._target_throttle = 0.0
+            engine._target_boost = -0.20
+            engine.render_chunk(int(0.10 * engine.SAMPLE_RATE))
+            self.assertGreater(charged_spool, 0.50)
+            self.assertGreater(engine._turbo_spool, charged_spool * 0.65)
+            self.assertGreater(engine._turbo_coast_mix, 0.60)
         finally:
             engine.close()
 

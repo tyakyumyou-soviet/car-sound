@@ -5,3 +5,10 @@ __pycache__/
 # User-supplied video extraction; kept local until redistribution rights are confirmed.
 assets/audio/user_r34_reference.mp3
 assets/audio/user_high_boost_reference.mp3
+assets/audio/screen_recording_reference.wav
+assets/audio/turbo_types_tonal_reference.wav
+assets/audio/turbo_types_fast_response_reference.wav
+assets/audio/turbo_types_coast_reference.wav
+assets/audio/turbo_types_intro_reference.wav
+assets/audio/turbo_intro_accel_reference.wav
+assets/audio/turbo_intro_coast_reference.wav
